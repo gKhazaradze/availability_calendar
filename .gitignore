@@ -1,0 +1,16 @@
+# Local env / secrets (ADMIN_KEY)
+.env
+
+# SQLite databases — runtime data, lives in the Docker volume in prod
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Editor / OS
+.DS_Store
+**/.DS_Store

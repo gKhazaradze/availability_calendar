@@ -1,0 +1,18 @@
+# Development overlay — mounts local source, enables gunicorn --reload, and
+# republishes localhost:8000 (the base compose is network-only for production
+# behind Caddy, so it no longer publishes a host port).
+#
+# Usage:
+#   docker network create web   # once — the base declares `web` as external
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#   # → http://localhost:8000
+
+services:
+  availability:
+    ports:
+      - "8000:8000"             # local access (base compose publishes nothing)
+    volumes:
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+    command: gunicorn --reload -b 0.0.0.0:8000 app:app
+    restart: "no"

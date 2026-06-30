@@ -1,0 +1,38 @@
+# Production: availability-calendar runs as a NETWORK-ONLY container behind the
+# platform's Caddy edge. It publishes NO host ports and joins the shared external
+# `web` network, where Caddy reaches it as `availability:8000` and serves it at
+# availability.<domain>. (See the platform repo's CONTRACT.md.)
+#
+#   docker compose up -d --build      # build + start (no host port published)
+#
+# Local development (publishes localhost:8000, auto-reload on code changes):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Stop with: docker compose down
+#
+# The shared network must exist:  docker network create web
+# The SQLite DB lives in the named `availability-data` volume.
+
+services:
+  availability:
+    build: .
+    container_name: availability       # stable name the Caddyfile targets
+    environment:
+      # The owner key that unlocks all editing. Set it in a .env file next to
+      # this one (ADMIN_KEY=...) so it's never baked into the image.
+      - ADMIN_KEY=${ADMIN_KEY:-changeme}
+    volumes:
+      # Persist the SQLite DB (trips, friends, participants) across rebuilds.
+      - availability-data:/app/data
+    restart: unless-stopped
+    networks: [web]
+
+networks:
+  # Shared edge network, created out-of-band and owned by the platform repo.
+  # availability just attaches; Caddy routes availability.<domain> -> availability:8000.
+  web:
+    external: true
+    name: web
+
+volumes:
+  availability-data:
+    name: availability-data

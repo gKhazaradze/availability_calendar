@@ -1,0 +1,100 @@
+name: Deploy (Docker)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # allow manual triggering from the GitHub UI
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Syntax-check frontend JS
+        run: |
+          # Fail fast if we've broken the JS before shipping to prod
+          node -c frontend/api.js
+          node -c frontend/app.js
+
+      - name: Syntax-check Python
+        run: python3 -m py_compile backend/app.py
+
+      - name: Backend tests
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r backend/requirements-dev.txt
+          python3 -m pytest backend/ -q
+
+      - name: Validate compose file
+        run: |
+          # docker-compose.yml has `environment: ADMIN_KEY=${ADMIN_KEY:-changeme}`,
+          # which resolves with no .env; just check the base + dev overlay parse.
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config -q
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            # The repo is private and Docker needs root, so deploy via sudo.
+            # A NOPASSWD sudoers rule (set up by deploy/setup-server.sh) limits
+            # this to git + docker.
+            echo "--- Syncing latest code ---"
+            sudo git config --global --add safe.directory /srv/availability || true
+            sudo git -C /srv/availability fetch --prune origin main
+            sudo git -C /srv/availability reset --hard origin/main
+
+            echo "--- Ensuring shared edge network exists ---"
+            # our compose joins the external `web` network owned by the platform
+            # repo; create-if-missing so a missing network can't fail us.
+            sudo docker network inspect web >/dev/null 2>&1 || sudo docker network create web
+
+            echo "--- Building & (re)starting the container ---"
+            cd /srv/availability
+            sudo docker compose up -d --build --remove-orphans
+
+            echo "--- Pruning dangling images (keep disk in check) ---"
+            sudo docker image prune -f >/dev/null 2>&1 || true
+
+            echo "--- Waiting for the API to come up (inside the container) ---"
+            # availability publishes no host port (Caddy owns the edge), so probe
+            # the app directly inside the container instead of host :80.
+            for i in $(seq 1 15); do
+              if sudo docker exec availability python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health').status==200 else 1)" 2>/dev/null; then
+                echo "API is healthy"; exit 0
+              fi
+              sleep 2
+            done
+            echo "API failed to come up in time"
+            sudo docker compose logs --tail=40
+            exit 1
+
+      - name: Post-deploy public health check
+        run: |
+          # availability is served by Caddy at its subdomain over HTTPS.
+          # Set repo secret AVAILABILITY_URL = https://availability.<domain>
+          for i in 1 2 3 4 5; do
+            if curl -sf --max-time 5 "${{ secrets.AVAILABILITY_URL }}/api/health" > /dev/null; then
+              echo "Public endpoint healthy"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Public endpoint not responding"
+          exit 1
