@@ -399,7 +399,8 @@ function renderOwnerRoster(t) {
   return `<div class="tc-roster">
     ${rows.join("") || `<div class="muted small">No passengers yet</div>`}
     <div class="roster-add">
-      <input type="text" class="roster-add-input" data-addguest="${t.id}" placeholder="Add a guest by name…" maxlength="80" />
+      <input type="text" class="roster-add-input" data-addguest="${t.id}" placeholder="Add a friend or guest by name…" maxlength="80" autocomplete="off" />
+      <div class="guest-suggest" data-suggest="${t.id}" hidden></div>
     </div>
   </div>`;
 }
@@ -414,12 +415,73 @@ function wireTripCards() {
   root.querySelectorAll("[data-approve]").forEach(b => b.onclick = () => act(() => API.approveRequest(+b.dataset.approve), "Approved."));
   root.querySelectorAll("[data-decline]").forEach(b => b.onclick = () => act(() => API.declineRequest(+b.dataset.decline), "Declined."));
   root.querySelectorAll("[data-remove]").forEach(b => b.onclick = () => act(() => API.removeParticipant(+b.dataset.remove), "Removed."));
-  root.querySelectorAll("[data-addguest]").forEach(inp => inp.addEventListener("keydown", e => {
+  root.querySelectorAll("[data-addguest]").forEach(inp => {
+    const tripId = +inp.dataset.addguest;
+    const box = root.querySelector(`.guest-suggest[data-suggest="${tripId}"]`);
+    setupGuestAutocomplete(inp, box, tripId);
+  });
+}
+
+// ─── GUEST AUTOCOMPLETE (owner) ────────────────────────────────────────────
+// The "add" box suggests friends NOT already on this trip and filters them by
+// what's typed. Picking one links by friend_id (so the friend sees it as their
+// own trip and can't double-request); free text still adds a plain guest.
+
+let friendsCache = null;
+async function getFriends() {
+  if (!friendsCache) friendsCache = await API.listFriends();
+  return friendsCache;
+}
+function invalidateFriends() { friendsCache = null; }
+
+function setupGuestAutocomplete(inp, box, tripId) {
+  if (!box) return;
+  const trip = state.tripsById[tripId];
+  // Friends already on the trip (confirmed or pending) — exclude from suggestions.
+  const taken = new Set((trip.participants || [])
+    .filter(p => p.friend_id && (p.status === "confirmed" || p.status === "pending"))
+    .map(p => p.friend_id));
+
+  async function candidates() {
+    const q = inp.value.trim().toLowerCase();
+    const friends = await getFriends();
+    return friends.filter(f => !taken.has(f.id) && f.name.toLowerCase().includes(q));
+  }
+
+  async function refresh() {
+    const list = await candidates();
+    if (!list.length) { box.hidden = true; box.innerHTML = ""; return; }
+    box.innerHTML = list.slice(0, 8).map(f =>
+      `<button type="button" class="suggest-item" data-fid="${f.id}">
+        <span class="suggest-name">${escapeHtml(f.name)}</span>
+        <span class="suggest-tier tier-${escapeHtml(f.tier)}">${escapeHtml(f.tier)}${f.enabled ? "" : " · off"}</span>
+      </button>`).join("");
+    box.hidden = false;
+    box.querySelectorAll("[data-fid]").forEach(b =>
+      // mousedown fires before the input's blur, so the click isn't swallowed
+      b.addEventListener("mousedown", e => {
+        e.preventDefault();
+        box.hidden = true;
+        act(() => API.addParticipant(tripId, { friend_id: +b.dataset.fid }), "Added.");
+      }));
+  }
+
+  inp.addEventListener("focus", refresh);
+  inp.addEventListener("input", refresh);
+  inp.addEventListener("blur", () => setTimeout(() => { box.hidden = true; }, 150));
+  inp.addEventListener("keydown", async e => {
+    if (e.key === "Escape") { box.hidden = true; return; }
     if (e.key !== "Enter") return;
     e.preventDefault();
-    const name = inp.value.trim();
-    if (name) act(() => API.addParticipant(+inp.dataset.addguest, { name }), "Added.");
-  }));
+    const typed = inp.value.trim();
+    if (!typed) return;
+    // Enter on a name that exactly matches an available friend links them by id;
+    // otherwise it's added as a plain named guest.
+    const list = await candidates();
+    const exact = list.find(f => f.name.toLowerCase() === typed.toLowerCase());
+    if (exact) act(() => API.addParticipant(tripId, { friend_id: exact.id }), "Added.");
+    else act(() => API.addParticipant(tripId, { name: typed }), "Added.");
+  });
 }
 
 // Run a mutation, then refresh the calendar + open day modal + pending badge.
@@ -550,18 +612,18 @@ async function openFriends() {
       tier: row.querySelector(".fr-tier").value,
       enabled: row.querySelector(".fr-on").checked,
     };
-    try { await API.updateFriend(+b.dataset.save, body); toast("Saved.", "ok"); openFriends(); }
+    try { await API.updateFriend(+b.dataset.save, body); invalidateFriends(); toast("Saved.", "ok"); openFriends(); }
     catch (e) { toast(msg(e), "error"); }
   });
   root.querySelectorAll("[data-rotate]").forEach(b => b.onclick = async () => {
     openConfirm("Rotate this link? The old link stops working immediately.", async () => {
-      try { await API.updateFriend(+b.dataset.rotate, { rotate: true }); toast("New link generated.", "ok"); openFriends(); }
+      try { await API.updateFriend(+b.dataset.rotate, { rotate: true }); invalidateFriends(); toast("New link generated.", "ok"); openFriends(); }
       catch (e) { toast(msg(e), "error"); }
     });
   });
   root.querySelectorAll("[data-delf]").forEach(b => b.onclick = () => {
     openConfirm("Delete this friend? Their link stops working; confirmed seats stay as named guests.", async () => {
-      try { await API.deleteFriend(+b.dataset.delf); toast("Friend deleted.", "ok"); openFriends(); }
+      try { await API.deleteFriend(+b.dataset.delf); invalidateFriends(); toast("Friend deleted.", "ok"); openFriends(); }
       catch (e) { toast(msg(e), "error"); }
     });
   });
@@ -569,7 +631,7 @@ async function openFriends() {
     const name = document.getElementById("nf-name").value.trim();
     const tier = document.getElementById("nf-tier").value;
     if (!name) return toast("Enter a name.", "error");
-    try { await API.createFriend({ name, tier }); toast("Friend added.", "ok"); openFriends(); }
+    try { await API.createFriend({ name, tier }); invalidateFriends(); toast("Friend added.", "ok"); openFriends(); }
     catch (e) { toast(msg(e), "error"); }
   };
 }
