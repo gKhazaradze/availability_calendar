@@ -110,13 +110,15 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .chip-label { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .chip-seat { margin-left: auto; background: rgba(0, 0, 0, .28); border-radius: 9px; padding: 0 6px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
 .chip.busy { background: #495063; }
-/* A trip the viewer is on (by seat or name match) — green line through the days */
-.chip.mine, .chip.detail.mine, .chip.busy.mine { background: var(--ok); color: #022; }
-.chip.mine .chip-seat { background: rgba(0, 0, 0, .18); }
 .chip.detail.cat-ski { background: var(--cat-ski); }
 .chip.detail.cat-summer { background: var(--cat-summer); color: #261a00; }
 .chip.detail.cat-travel { background: var(--cat-travel); color: #022; }
 .chip.detail.cat-other { background: var(--cat-other); color: #111; }
+/* A trip the viewer is on (by seat or name match) — green line through the days.
+   Declared AFTER the category rules (equal specificity) so green wins and the
+   whole multi-day bar reads green instead of the category color. */
+.chip.detail.mine, .chip.busy.mine, .chip.mine { background: var(--ok); color: #022; }
+.chip.mine .chip-seat { background: rgba(0, 0, 0, .18); }
 /* span continuity: trim radius on joins so a multi-day stay reads as a bar */
 .chip.span-start { border-top-right-radius: 0; border-bottom-right-radius: 0; margin-right: -7px; }
 .chip.span-mid { border-radius: 0; margin-left: -7px; margin-right: -7px; }
