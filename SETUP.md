@@ -29,9 +29,9 @@ network-only.
 ```bash
 ssh -i your-key.pem ec2-user@<server>     # or ubuntu@ on Ubuntu/Debian
 
-curl -sSL https://raw.githubusercontent.com/<you>/availability_calendar/main/deploy/setup-server.sh > setup.sh
+curl -sSL https://raw.githubusercontent.com/gKhazaradze/availability_calendar/main/deploy/setup-server.sh > setup.sh
 chmod +x setup.sh
-sudo ./setup.sh https://github.com/<you>/availability_calendar.git
+sudo ./setup.sh https://github.com/gKhazaradze/availability_calendar.git
 ```
 
 **Save the `ADMIN_KEY` it prints** — it's shown only once. It's the key you enter
@@ -90,7 +90,7 @@ Add repo secrets (Settings → Secrets and variables → Actions):
 | `EC2_HOST` | server IP or hostname |
 | `EC2_USER` | `ec2-user` (Amazon Linux) or `ubuntu` |
 | `EC2_SSH_KEY` | contents of your deploy **private** key |
-| `AVAILABILITY_URL` | `https://availability.<domain>` (post-deploy health check) |
+| `AVAILABILITY_URL` | `https://availability.georgelands.com` (post-deploy health check) |
 
 Reuse the same deploy SSH key as roadtrip/platform (its public half is already in
 the box's `~/.ssh/authorized_keys`). From now on, **push to `main` redeploys**.
@@ -101,16 +101,16 @@ the box's `~/.ssh/authorized_keys`). From now on, **push to `main` redeploys**.
 
 ```bash
 # Public health over HTTPS (through Caddy):
-curl -sf https://availability.<domain>/api/health        # {"ok":true,"version":"1.0.0"}
+curl -sf https://availability.georgelands.com/api/health        # {"ok":true,"version":"1.0.0"}
 
 # Anonymous API is locked:
 curl -s -o /dev/null -w '%{http_code}\n' \
-  "https://availability.<domain>/api/calendar?from=2026-01-01&to=2026-01-31"   # 401
+  "https://availability.georgelands.com/api/calendar?from=2026-01-01&to=2026-01-31"   # 401
 ```
 
 Then in a browser:
 
-1. Open `https://availability.<domain>` → the **locked landing** page.
+1. Open `https://availability.georgelands.com` → the **locked landing** page.
 2. Click **Owner**, enter the `ADMIN_KEY`.
 3. Add a friend at each tier; **copy each invite link**.
 4. Create a ski day and a multi-day stay; add a guest.
@@ -125,7 +125,7 @@ Then in a browser:
 
 ## Troubleshooting
 
-**`availability.<domain>` 502s.** The container isn't up or isn't on `web`.
+**`availability.georgelands.com` 502s.** The container isn't up or isn't on `web`.
 `docker ps`, `docker network inspect web`, confirm `container_name: availability`
 matches the Caddyfile block. Logs: `cd /srv/availability && docker compose logs -f`.
 

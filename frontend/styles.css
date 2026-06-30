@@ -110,6 +110,9 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .chip-label { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .chip-seat { margin-left: auto; background: rgba(0, 0, 0, .28); border-radius: 9px; padding: 0 6px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
 .chip.busy { background: #495063; }
+/* A trip the viewer is on (by seat or name match) — green line through the days */
+.chip.mine, .chip.detail.mine, .chip.busy.mine { background: var(--ok); color: #022; }
+.chip.mine .chip-seat { background: rgba(0, 0, 0, .18); }
 .chip.detail.cat-ski { background: var(--cat-ski); }
 .chip.detail.cat-summer { background: var(--cat-summer); color: #261a00; }
 .chip.detail.cat-travel { background: var(--cat-travel); color: #022; }
@@ -149,6 +152,8 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .trip-cards { display: flex; flex-direction: column; gap: 12px; }
 .trip-card { background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
 .trip-card.busy { opacity: .85; }
+.trip-card.mine { border-color: var(--ok); box-shadow: inset 3px 0 0 var(--ok); }
+.tc-dot.mine { background: var(--ok); }
 .tc-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
 .tc-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--cat-other); }
 .tc-dot.busy { background: #495063; }

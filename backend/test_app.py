@@ -141,6 +141,41 @@ def test_owner_sees_pending_with_status(client, make_friend, make_trip):
     assert trip["privacy"] == "normal"
 
 
+def test_name_match_marks_trip_as_mine(client, make_friend, make_trip):
+    t = make_trip(car_seats=3)
+    # Owner adds a GUEST named "Alex" (no friend_id link).
+    client.post(f"/api/admin/trips/{t['id']}/participants", json={"name": "Alex"}, headers=ADMIN)
+    # Case-insensitive name match: friend "alex" is flagged on_trip even at busy tier.
+    alex = make_friend(name="alex", tier="busy")
+    sam = make_friend(name="Sam", tier="busy")
+    a = _trip_for(client, alex["token"], t["id"])
+    s = _trip_for(client, sam["token"], t["id"])
+    assert a["on_trip"] is True
+    assert s["on_trip"] is False
+    # Still no detail/name leak at busy tier — only the boolean.
+    assert "participants" not in a and "destination" not in a
+
+
+def test_busy_only_still_marks_own_trip_without_detail(client, make_friend, make_trip):
+    t = make_trip(privacy="busy_only", car_seats=3)
+    client.post(f"/api/admin/trips/{t['id']}/participants", json={"name": "Alex"}, headers=ADMIN)
+    alex = make_friend(name="Alex", tier="full")
+    a = _trip_for(client, alex["token"], t["id"])
+    assert a["on_trip"] is True            # knows it's their own day
+    assert "destination" not in a          # private trip still hides everything else
+
+
+def test_confirmed_by_request_sets_on_trip_and_blocks_request(client, make_friend, make_trip):
+    t = make_trip(car_seats=2)
+    f = make_friend(tier="full")
+    client.post(f"/api/trips/{t['id']}/request-seat", headers=friend_headers(f["token"]))
+    rid = client.get("/api/admin/requests", headers=ADMIN).get_json()["requests"][0]["id"]
+    client.post(f"/api/admin/requests/{rid}/approve", headers=ADMIN)
+    trip = _trip_for(client, f["token"], t["id"])
+    assert trip["on_trip"] is True
+    assert trip["can_request"] is False
+
+
 def test_error_bodies_never_leak_destination(client, make_friend, make_trip):
     t = make_trip(destination="SecretValley", car_seats=1, notes="secret note")
     basic = make_friend(tier="basic")

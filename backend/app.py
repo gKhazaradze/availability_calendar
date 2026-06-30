@@ -356,12 +356,25 @@ def project_trip(trip, viewer, db):
         "status": "busy",
     }
 
+    confirmed = confirmed_rows(db, trip["id"])
+    confirmed_count = len(confirmed)
+
+    # Is the viewing friend on this trip — by their friend_id OR a case-insensitive
+    # match on their account name against a confirmed participant (so an
+    # owner-added guest named "Alex" lights up for the friend "Alex")? Computed for
+    # EVERY tier, even busy / busy_only, so the calendar can mark the viewer's own
+    # trips green. Only the boolean is exposed — never anyone else's name.
+    if viewer["role"] == "friend":
+        nm = (viewer["name"] or "").strip().lower()
+        out["on_trip"] = any(
+            (viewer["friend_id"] is not None and c["friend_id"] == viewer["friend_id"])
+            or (nm and (c["display_name"] or "").strip().lower() == nm)
+            for c in confirmed
+        )
+
     show_detail = is_owner or (trip["privacy"] == "normal" and tier in ("basic", "full"))
     if not show_detail:
         return out
-
-    confirmed = confirmed_rows(db, trip["id"])
-    confirmed_count = len(confirmed)
 
     out.update({
         "destination": trip["destination"],
@@ -390,7 +403,9 @@ def project_trip(trip, viewer, db):
         ).fetchone()
         out["my_status"] = own["status"] if own else None
         out["my_request_id"] = own["id"] if own and own["status"] == "pending" else None
-        out["can_request"] = (tier == "full" and out["my_status"] not in ("pending", "confirmed"))
+        # Already on the trip (incl. by name match) → no point requesting a seat.
+        out["can_request"] = (tier == "full" and not out.get("on_trip")
+                              and out["my_status"] not in ("pending", "confirmed"))
 
     if is_owner:
         out["privacy"] = trip["privacy"]

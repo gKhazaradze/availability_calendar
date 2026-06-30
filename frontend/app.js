@@ -248,13 +248,14 @@ function renderCalendar() {
       const span = (t.start_date === t.end_date) ? "single"
         : startsHere ? "start" : endsHere ? "end" : "mid";
       const label = (startsHere || weekStart);
+      const mine = t.on_trip ? " mine" : "";   // green: a trip the viewer is on
       if (t.destination) {
         const seat = (label && t.car_seats > 0)
           ? `<span class="chip-seat">${t.free_seats}/${t.car_seats}</span>` : "";
-        chips += `<div class="chip detail span-${span} cat-${escapeHtml(t.category || "other")}">
+        chips += `<div class="chip detail span-${span} cat-${escapeHtml(t.category || "other")}${mine}">
           ${label ? `<span class="chip-label">${escapeHtml(t.destination)}</span>${seat}` : ""}</div>`;
       } else {
-        chips += `<div class="chip busy span-${span}">${label ? `<span class="chip-label">Busy</span>` : ""}</div>`;
+        chips += `<div class="chip busy span-${span}${mine}">${label ? `<span class="chip-label">Busy</span>` : ""}</div>`;
       }
     }
     if (trips.length > 2) chips += `<div class="chip-more">+${trips.length - 2}</div>`;
@@ -327,9 +328,10 @@ function renderTripCard(t) {
 
   if (!t.destination) {
     // busy-only projection (busy tier, or a busy_only trip seen by a friend)
-    return `<div class="trip-card busy">
-      <div class="tc-title"><span class="tc-dot busy"></span>Unavailable</div>
+    return `<div class="trip-card busy ${t.on_trip ? "mine" : ""}">
+      <div class="tc-title"><span class="tc-dot ${t.on_trip ? "mine" : "busy"}"></span>${t.on_trip ? "You're away this day" : "Unavailable"}</div>
       <div class="tc-dates">${escapeHtml(fmtRange(t.start_date, t.end_date))}</div>
+      ${t.on_trip ? `<div class="tc-actions"><span class="you-in">✓ You're on this trip</span></div>` : ""}
     </div>`;
   }
 
@@ -351,7 +353,8 @@ function renderTripCard(t) {
       <button class="btn btn-danger" data-del="${t.id}">Delete</button>
     </div>`;
   } else if (state.viewer.role === "friend") {
-    if (t.my_status === "confirmed") {
+    if (t.on_trip) {
+      // Confirmed by seat request OR matched by name to a guest you added.
       actions = `<div class="tc-actions"><span class="you-in">✓ You're on this trip</span></div>`;
     } else if (t.my_status === "pending") {
       actions = `<div class="tc-actions"><span class="pending-tag">⏳ Seat requested — pending</span>
@@ -362,7 +365,7 @@ function renderTripCard(t) {
     }
   }
 
-  return `<div class="trip-card">
+  return `<div class="trip-card ${t.on_trip ? "mine" : ""}">
     <div class="tc-title"><span class="tc-dot cat-${escapeHtml(t.category || "other")}"></span>${escapeHtml(t.destination)}
       ${t.category && t.category !== "other" ? `<span class="tag">${escapeHtml(t.category)}</span>` : ""}
       ${owner && t.privacy === "busy_only" ? `<span class="tag private">private</span>` : ""}</div>
