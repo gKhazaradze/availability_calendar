@@ -101,8 +101,22 @@ function escClose(e) { if (e.key === "Escape") closeModal(); }
 
 // ─── BOOT ─────────────────────────────────────────────────────────────────
 
+// The platform homepage lives on the apex domain; this app is a subdomain
+// (availability.<domain>). Strip the leading "availability." label to get back
+// there, keeping protocol/port. Overridable via window.PROJECTS_URL; falls back
+// to "/" when there's no subdomain to strip (e.g. bare localhost dev).
+function projectsUrl() {
+  if (typeof window !== "undefined" && window.PROJECTS_URL) return window.PROJECTS_URL;
+  const { protocol, hostname, port } = window.location;
+  const apex = hostname.replace(/^availability\./, "");
+  if (apex === hostname) return "/";
+  return `${protocol}//${apex}${port ? ":" + port : ""}`;
+}
+
 async function init() {
   API.captureInviteToken();
+  const back = document.getElementById("back-to-projects");
+  if (back) back.href = projectsUrl();
   document.getElementById("logo").addEventListener("click", e => {
     e.preventDefault();
     if (state.cursor) { state.cursor = startOfMonth(new Date()); loadAndRender(); }
