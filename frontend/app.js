@@ -331,7 +331,7 @@ function renderTripCard(t) {
     return `<div class="trip-card busy ${t.on_trip ? "mine" : ""}">
       <div class="tc-title"><span class="tc-dot ${t.on_trip ? "mine" : "busy"}"></span>${t.on_trip ? "You're away this day" : "Unavailable"}</div>
       <div class="tc-dates">${escapeHtml(fmtRange(t.start_date, t.end_date))}</div>
-      ${t.on_trip ? `<div class="tc-actions"><span class="you-in">✓ You're on this trip</span></div>` : ""}
+      ${friendActions(t)}
     </div>`;
   }
 
@@ -352,17 +352,8 @@ function renderTripCard(t) {
       <button class="btn btn-ghost" data-edit="${t.id}">Edit</button>
       <button class="btn btn-danger" data-del="${t.id}">Delete</button>
     </div>`;
-  } else if (state.viewer.role === "friend") {
-    if (t.on_trip) {
-      // Confirmed by seat request OR matched by name to a guest you added.
-      actions = `<div class="tc-actions"><span class="you-in">✓ You're on this trip</span></div>`;
-    } else if (t.my_status === "pending") {
-      actions = `<div class="tc-actions"><span class="pending-tag">⏳ Seat requested — pending</span>
-        ${t.my_request_id ? `<button class="btn btn-ghost" data-cancel="${t.my_request_id}">Cancel</button>` : ""}</div>`;
-    } else if (t.can_request) {
-      const waitlist = t.free_seats <= 0;
-      actions = `<div class="tc-actions"><button class="btn btn-primary" data-request="${t.id}">${waitlist ? "Join waitlist" : "Request a seat"}</button></div>`;
-    }
+  } else {
+    actions = friendActions(t);
   }
 
   return `<div class="trip-card ${t.on_trip ? "mine" : ""}">
@@ -376,6 +367,31 @@ function renderTripCard(t) {
     ${people}
     ${actions}
   </div>`;
+}
+
+// The friend-facing action row for a trip — shared by the busy and detail cards.
+//   confirmed (a linked seat)  → "you're on this trip" + Leave
+//   pending  (a seat request)  → pending + Cancel
+//   on_trip via name match only → "you're on this trip" (George's guest; no Leave)
+//   otherwise, full tier        → Request a seat / Join waitlist
+function friendActions(t) {
+  if (state.viewer.role !== "friend") return "";
+  if (t.my_status === "confirmed") {
+    return `<div class="tc-actions"><span class="you-in">✓ You're on this trip</span>
+      <button class="btn btn-ghost" data-leave="${t.id}">Leave trip</button></div>`;
+  }
+  if (t.my_status === "pending") {
+    return `<div class="tc-actions"><span class="pending-tag">⏳ Seat requested — pending</span>
+      <button class="btn btn-ghost" data-leave="${t.id}">Cancel</button></div>`;
+  }
+  if (t.on_trip) {   // name-matched guest the owner added — not the friend's to remove
+    return `<div class="tc-actions"><span class="you-in">✓ You're on this trip</span></div>`;
+  }
+  if (t.can_request) {
+    const waitlist = t.free_seats <= 0;
+    return `<div class="tc-actions"><button class="btn btn-primary" data-request="${t.id}">${waitlist ? "Join waitlist" : "Request a seat"}</button></div>`;
+  }
+  return "";
 }
 
 function renderOwnerRoster(t) {
@@ -409,7 +425,7 @@ function wireTripCards() {
   const root = document.getElementById("modal");
   if (!root) return;
   root.querySelectorAll("[data-request]").forEach(b => b.onclick = () => act(() => API.requestSeat(+b.dataset.request), "Seat requested."));
-  root.querySelectorAll("[data-cancel]").forEach(b => b.onclick = () => act(() => API.cancelRequest(+b.dataset.cancel), "Request cancelled."));
+  root.querySelectorAll("[data-leave]").forEach(b => b.onclick = () => act(() => API.leaveTrip(+b.dataset.leave), "Removed you from the trip."));
   root.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => openTripForm(state.tripsById[+b.dataset.edit]));
   root.querySelectorAll("[data-del]").forEach(b => b.onclick = () => delTrip(+b.dataset.del));
   root.querySelectorAll("[data-approve]").forEach(b => b.onclick = () => act(() => API.approveRequest(+b.dataset.approve), "Approved."));

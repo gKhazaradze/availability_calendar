@@ -371,6 +371,16 @@ def project_trip(trip, viewer, db):
             or (nm and (c["display_name"] or "").strip().lower() == nm)
             for c in confirmed
         )
+        # The viewer's OWN linked row status, if any — drives the Cancel (pending)
+        # / Leave (confirmed) button. Their own data, so it's exposed at every
+        # tier; it never reveals anyone else's row. Self-removal is done via
+        # DELETE /api/trips/:id/me (resolved by friend_id), so no id is needed.
+        own = db.execute(
+            "SELECT status FROM participants WHERE trip_id = ? AND friend_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (trip["id"], viewer["friend_id"]),
+        ).fetchone()
+        out["my_status"] = own["status"] if own else None
 
     show_detail = is_owner or (trip["privacy"] == "normal" and tier in ("basic", "full"))
     if not show_detail:
@@ -393,19 +403,9 @@ def project_trip(trip, viewer, db):
         out["notes"] = trip["notes"]
 
     if viewer["role"] == "friend":
-        # The viewer's OWN latest request row (and nobody else's). The id is the
-        # viewer's own data, so it's safe to return — it lets them cancel a
-        # pending request without exposing anyone else's row.
-        own = db.execute(
-            "SELECT id, status FROM participants "
-            "WHERE trip_id = ? AND friend_id = ? ORDER BY id DESC LIMIT 1",
-            (trip["id"], viewer["friend_id"]),
-        ).fetchone()
-        out["my_status"] = own["status"] if own else None
-        out["my_request_id"] = own["id"] if own and own["status"] == "pending" else None
         # Already on the trip (incl. by name match) → no point requesting a seat.
         out["can_request"] = (tier == "full" and not out.get("on_trip")
-                              and out["my_status"] not in ("pending", "confirmed"))
+                              and out.get("my_status") not in ("pending", "confirmed"))
 
     if is_owner:
         out["privacy"] = trip["privacy"]
@@ -535,21 +535,32 @@ def request_seat(trip_id):
     return jsonify(trip=project_trip(trip, get_viewer(), get_db())), 201
 
 
-@app.route("/api/requests/<int:req_id>", methods=["DELETE"])
-def cancel_request(req_id):
-    """A friend cancels their OWN pending request (IDOR-guarded)."""
+@app.route("/api/trips/<int:trip_id>/me", methods=["DELETE"])
+def leave_trip(trip_id):
+    """A friend removes their OWN participation from a trip — cancel a pending
+    request OR leave a confirmed seat (which frees it). The row is resolved by
+    (trip_id, friend_id), so there's no participant id to expose or guess: a
+    friend can only ever remove their own row, never someone else's.
+
+    Name-matched guests (an owner-added name with no friend_id link) are NOT
+    touched — those are the owner's to manage.
+    """
     viewer = get_viewer()
     if viewer["role"] != "friend":
         abort(401)
     with writing() as db:
         cur = db.execute(
-            "DELETE FROM participants "
-            "WHERE id = ? AND friend_id = ? AND status = 'pending'",
-            (req_id, viewer["friend_id"]),
+            "DELETE FROM participants WHERE trip_id = ? AND friend_id = ? "
+            "AND status IN ('pending', 'confirmed')",
+            (trip_id, viewer["friend_id"]),
         )
-        if cur.rowcount != 1:
+        if cur.rowcount < 1:
             fail(404, "not_found")
-    return jsonify(ok=True)
+    db = get_db()
+    trip = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
+    if trip is None:
+        return jsonify(ok=True)
+    return jsonify(trip=project_trip(trip, get_viewer(), db))
 
 
 # ─── API: admin — trips ────────────────────────────────────────────────────

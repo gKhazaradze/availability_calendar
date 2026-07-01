@@ -104,7 +104,9 @@ const API = (() => {
   function requestSeat(tripId) {
     return request("POST", `/api/trips/${tripId}/request-seat`).then(d => d.trip);
   }
-  function cancelRequest(reqId) { return request("DELETE", `/api/requests/${reqId}`); }
+  // Remove the caller's own participation (cancel a pending request OR leave a
+  // confirmed seat). Resolved server-side by friend_id — no id needed.
+  function leaveTrip(tripId) { return request("DELETE", `/api/trips/${tripId}/me`); }
 
   // ─── Owner: trips ──────────────────────────────────────────────────────
 
@@ -134,7 +136,7 @@ const API = (() => {
     captureInviteToken, whoami, isOwner, hasUserToken,
     loginOwner, logoutOwner, forgetUser,
     getCalendar, getTrip,
-    requestSeat, cancelRequest,
+    requestSeat, leaveTrip,
     adminTrips, createTrip, updateTrip, deleteTrip,
     addParticipant, removeParticipant, listRequests, approveRequest, declineRequest,
     listFriends, createFriend, updateFriend, deleteFriend,

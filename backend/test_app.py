@@ -209,19 +209,17 @@ def test_request_then_owner_approve_confirms_and_drops_seat(client, make_friend,
     assert trip["participants"] == [{"name": "Friend"}]
 
 
-def test_own_request_id_exposed_only_to_self(client, make_friend, make_trip):
+def test_my_status_is_per_viewer_and_no_id_leaks(client, make_friend, make_trip):
     t = make_trip(car_seats=3)
     asker = make_friend(name="Asker", tier="full")
     other = make_friend(name="Other", tier="full")
     client.post(f"/api/trips/{t['id']}/request-seat", headers=friend_headers(asker["token"]))
     mine = _trip_for(client, asker["token"], t["id"])
-    assert isinstance(mine["my_request_id"], int)      # self can cancel
+    assert mine["my_status"] == "pending"
+    # No participant id is exposed to friends at all (self-removal is by friend_id).
+    assert "my_request_id" not in mine and "my_participant_id" not in mine
     theirs = _trip_for(client, other["token"], t["id"])
     assert theirs["my_status"] is None
-    assert theirs["my_request_id"] is None             # never sees another's id
-    # And the friend can cancel using exactly that id.
-    assert client.delete(f"/api/requests/{mine['my_request_id']}",
-                         headers=friend_headers(asker["token"])).status_code == 200
 
 
 def test_overbooking_blocked_on_approve(client, make_friend, make_trip):
@@ -266,27 +264,37 @@ def test_busy_and_basic_cannot_request(client, make_friend, make_trip):
         assert r.status_code == 403, tier
 
 
-def test_self_cancel_only_own_pending(client, make_friend, make_trip):
+def test_self_leave_affects_only_caller(client, make_friend, make_trip):
     t = make_trip(car_seats=3)
     a = make_friend(name="A", tier="full")
     b = make_friend(name="B", tier="full")
     client.post(f"/api/trips/{t['id']}/request-seat", headers=friend_headers(a["token"]))
-    rid = client.get("/api/admin/requests", headers=ADMIN).get_json()["requests"][0]["id"]
-    # B cannot cancel A's request (IDOR).
-    assert client.delete(f"/api/requests/{rid}", headers=friend_headers(b["token"])).status_code == 404
-    # A can.
-    assert client.delete(f"/api/requests/{rid}", headers=friend_headers(a["token"])).status_code == 200
-    assert client.get("/api/admin/requests", headers=ADMIN).get_json()["requests"] == []
+    client.post(f"/api/trips/{t['id']}/request-seat", headers=friend_headers(b["token"]))
+    # The endpoint resolves by friend_id — no id to guess, so A only ever removes A.
+    assert client.delete(f"/api/trips/{t['id']}/me", headers=friend_headers(a["token"])).status_code == 200
+    names = [r["display_name"] for r in client.get("/api/admin/requests", headers=ADMIN).get_json()["requests"]]
+    assert names == ["B"]                       # B's request untouched
 
 
-def test_cannot_self_cancel_confirmed(client, make_friend, make_trip):
+def test_friend_with_no_row_cannot_leave(client, make_friend, make_trip):
+    t = make_trip(car_seats=3)
+    f = make_friend(tier="full")
+    assert client.delete(f"/api/trips/{t['id']}/me", headers=friend_headers(f["token"])).status_code == 404
+
+
+def test_friend_can_leave_confirmed_and_frees_seat(client, make_friend, make_trip):
     t = make_trip(car_seats=2)
     f = make_friend(tier="full")
     client.post(f"/api/trips/{t['id']}/request-seat", headers=friend_headers(f["token"]))
     rid = client.get("/api/admin/requests", headers=ADMIN).get_json()["requests"][0]["id"]
     client.post(f"/api/admin/requests/{rid}/approve", headers=ADMIN)
-    # Now confirmed — self-cancel (pending-only) must not remove it.
-    assert client.delete(f"/api/requests/{rid}", headers=friend_headers(f["token"])).status_code == 404
+    assert _trip_for(client, f["token"], t["id"])["free_seats"] == 1
+    # Now confirmed — the friend can leave, which frees the seat.
+    assert client.delete(f"/api/trips/{t['id']}/me", headers=friend_headers(f["token"])).status_code == 200
+    after = _trip_for(client, f["token"], t["id"])
+    assert after["on_trip"] is False
+    assert after["my_status"] is None
+    assert after["free_seats"] == 2
 
 
 def test_owner_add_respects_capacity(client, make_trip):
