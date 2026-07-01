@@ -386,3 +386,125 @@ def test_calendar_rejects_oversized_and_bad_range(client, make_friend):
     assert client.get("/api/calendar?from=2026-01-01&to=2030-01-01", headers=h).status_code == 400
     assert client.get("/api/calendar?from=2026-05-01&to=2026-04-01", headers=h).status_code == 400
     assert client.get("/api/calendar?from=bad&to=2026-04-01", headers=h).status_code == 400
+
+
+# ─── Friend login (name + birthday) ────────────────────────────────────────
+# Login exchanges a name+birthday for the friend's existing bearer token; the
+# token still drives every later request, so these tests cover only the new
+# credential exchange and its throttle. Distinct X-Forwarded-For values isolate
+# the per-IP rate-limit tests from each other.
+
+def _login(client, name, birthday, ip="10.0.0.1"):
+    return client.post(
+        "/api/login",
+        json={"name": name, "birthday": birthday},
+        headers={"X-Forwarded-For": ip},
+    )
+
+
+def test_login_success_returns_working_token(client, make_friend):
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    r = _login(client, "Nino", "1995-04-10")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["name"] == "Nino" and body["tier"] == "full"
+    me = client.get("/api/me", headers=friend_headers(body["token"]))
+    assert me.status_code == 200 and me.get_json()["tier"] == "full"
+
+
+def test_login_is_case_insensitive_and_trims_name(client, make_friend):
+    make_friend(name="Nino", tier="basic", birthday="1995-04-10")
+    assert _login(client, "  nino ", "1995-04-10").status_code == 200
+
+
+def test_login_wrong_birthday_is_opaque_401(client, make_friend):
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    r = _login(client, "Nino", "1995-04-11")
+    assert r.status_code == 401 and r.get_json()["error"] == "bad_login"
+
+
+def test_login_unknown_name_401(client, make_friend):
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    r = _login(client, "Ghost", "1995-04-10")
+    assert r.status_code == 401 and r.get_json()["error"] == "bad_login"
+
+
+def test_login_disabled_friend_denied(client, make_friend):
+    f = make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    client.put(f"/api/admin/friends/{f['id']}", json={"enabled": False}, headers=ADMIN)
+    assert _login(client, "Nino", "1995-04-10").status_code == 401
+
+
+def test_login_friend_without_birthday_cannot_login(client, make_friend):
+    make_friend(name="Nino", tier="full")            # NULL birthday
+    assert _login(client, "Nino", "1995-04-10").status_code == 401
+
+
+def test_login_requires_name_and_valid_birthday(client, make_friend):
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    assert client.post("/api/login", json={"name": "Nino"}).status_code == 400            # no birthday
+    assert client.post("/api/login", json={"name": "Nino", "birthday": "nope"}).status_code == 400
+    assert client.post("/api/login", json={"birthday": "1995-04-10"}).status_code == 400  # no name
+
+
+def test_login_ambiguous_name_and_birthday_denied(client, make_friend):
+    # Two enabled friends sharing BOTH name and birthday: login can't pick one,
+    # so it denies rather than guess — and leaks nothing about the collision.
+    make_friend(name="Sam", tier="full", birthday="2000-01-01")
+    make_friend(name="Sam", tier="busy", birthday="2000-01-01")
+    r = _login(client, "Sam", "2000-01-01")
+    assert r.status_code == 401 and r.get_json()["error"] == "bad_login"
+
+
+def test_login_rate_limited_per_ip(client, make_friend):
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    for _ in range(10):                               # 10 misses are allowed
+        assert _login(client, "Nino", "1900-01-01", ip="9.9.9.9").status_code == 401
+    assert _login(client, "Nino", "1900-01-01", ip="9.9.9.9").status_code == 429
+    # Lockout blocks even the CORRECT credential during the window...
+    assert _login(client, "Nino", "1995-04-10", ip="9.9.9.9").status_code == 429
+    # ...but a different IP is unaffected.
+    assert _login(client, "Nino", "1995-04-10", ip="8.8.8.8").status_code == 200
+
+
+def test_login_success_clears_failure_streak(client, make_friend):
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    for _ in range(9):
+        assert _login(client, "Nino", "1900-01-01", ip="7.7.7.7").status_code == 401
+    assert _login(client, "Nino", "1995-04-10", ip="7.7.7.7").status_code == 200   # resets streak
+    for _ in range(9):                                 # 9 fresh misses don't trip the limit
+        assert _login(client, "Nino", "1900-01-01", ip="7.7.7.7").status_code == 401
+
+
+def test_admin_create_rejects_bad_birthday(client):
+    r = client.post("/api/admin/friends",
+                    json={"name": "Nino", "tier": "full", "birthday": "not-a-date"}, headers=ADMIN)
+    assert r.status_code == 400
+
+
+def test_admin_can_set_and_clear_birthday(client, make_friend):
+    f = make_friend(name="Nino", tier="full")          # created with no birthday
+    assert f["birthday"] is None
+    client.put(f"/api/admin/friends/{f['id']}", json={"birthday": "1995-04-10"}, headers=ADMIN)
+    assert _login(client, "Nino", "1995-04-10").status_code == 200
+    client.put(f"/api/admin/friends/{f['id']}", json={"birthday": ""}, headers=ADMIN)   # clear
+    assert _login(client, "Nino", "1995-04-10").status_code == 401
+
+
+def test_login_throttle_window_expires(client, make_friend):
+    # Failures older than LOGIN_WINDOW_SEC don't count: 10 stale misses leave the
+    # gate open (a wrong guess still 401s, not 429). Seed the rows directly with
+    # an old timestamp rather than waiting out the real 15-minute window.
+    import os
+    import sqlite3
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    con = sqlite3.connect(os.environ["AVAILABILITY_DB"])
+    con.executemany(
+        "INSERT INTO login_attempts (ip, created_at) VALUES (?, datetime('now', '-2 hours'))",
+        [("5.5.5.5",)] * 10,
+    )
+    con.commit()
+    con.close()
+    # Not locked out — the stale rows are outside the window.
+    assert _login(client, "Nino", "1900-01-01", ip="5.5.5.5").status_code == 401
+    assert _login(client, "Nino", "1995-04-10", ip="5.5.5.5").status_code == 200

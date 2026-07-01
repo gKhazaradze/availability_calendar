@@ -26,6 +26,9 @@ const ERR = {
   forbidden: "You don't have access to do that.",
   unauthorized: "Please sign in again.",
   not_found: "Not found.",
+  bad_login: "That name and birthday don't match. Check with George.",
+  too_many_attempts: "Too many tries. Wait a few minutes and try again.",
+  bad_birthday: "Please enter a valid birthday.",
   bad_date: "Please use valid dates.",
   end_before_start: "End date can't be before the start date.",
   range_too_large: "Date range is too large.",
@@ -136,12 +139,52 @@ function renderHeader() {
   } else if (v.role === "friend") {
     c.innerHTML = `
       <span class="badge tier-${escapeHtml(v.tier)}">${escapeHtml(v.name)} · ${escapeHtml(v.tier)}</span>
+      <button class="btn btn-ghost" id="btn-signout-friend" title="Sign out">Sign out</button>
       <button class="btn btn-ghost" id="btn-owner" title="Owner sign-in">⚙</button>`;
+    c.querySelector("#btn-signout-friend").onclick = () => { API.forgetUser(); location.reload(); };
     c.querySelector("#btn-owner").onclick = openOwnerLogin;
   } else {
-    c.innerHTML = `<button class="btn btn-ghost" id="btn-owner">Owner</button>`;
+    c.innerHTML = `
+      <button class="btn btn-primary" id="btn-login">Sign in</button>
+      <button class="btn btn-ghost" id="btn-owner">Owner</button>`;
+    c.querySelector("#btn-login").onclick = openFriendLogin;
     c.querySelector("#btn-owner").onclick = openOwnerLogin;
   }
+}
+
+// ─── FRIEND LOGIN ─────────────────────────────────────────────────────────
+
+function openFriendLogin() {
+  openModal(`
+    <h2>Sign in</h2>
+    <p class="modal-sub">Enter your name and birthday, exactly as George set them up, to see trip details and request a seat.</p>
+    <label class="field"><span>Name</span>
+      <input type="text" id="fl-name" autocomplete="off" placeholder="Your name" maxlength="80" /></label>
+    <label class="field"><span>Birthday</span>
+      <input type="date" id="fl-bday" autocomplete="off" /></label>
+    <div class="modal-error" id="fl-error"></div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn btn-primary" id="fl-go">Sign in</button>
+    </div>`);
+  const name = document.getElementById("fl-name");
+  const bday = document.getElementById("fl-bday");
+  name.focus();
+  const go = async () => {
+    const err = document.getElementById("fl-error");
+    err.textContent = "";
+    if (!name.value.trim() || !bday.value) { err.textContent = "Enter your name and birthday."; return; }
+    try {
+      await API.loginFriend(name.value, bday.value);
+      location.reload();
+    } catch (e) {
+      err.textContent = msg(e);
+    }
+  };
+  document.getElementById("fl-go").onclick = go;
+  [name, bday].forEach(el => el.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); go(); }
+  }));
 }
 
 // ─── OWNER LOGIN ──────────────────────────────────────────────────────────
@@ -256,7 +299,7 @@ function renderCalendar() {
   const legend = state.viewer.role === "owner"
     ? `<span class="legend-hint">Click a day to add a trip · click a trip to manage it</span>`
     : state.viewer.role === "anon"
-    ? `<span class="legend-hint">Marked days are unavailable · ask George for a personal link to see details</span>`
+    ? `<span class="legend-hint">Marked days are unavailable · sign in with your name and birthday to see details</span>`
     : `<span class="legend-hint">Click a marked day for details${state.viewer.tier === "full" ? " · request a seat" : ""}</span>`;
 
   document.getElementById("main-content").innerHTML = `
@@ -580,12 +623,15 @@ async function openFriends() {
   const rows = friends.map(f => `
     <div class="friend-row ${f.enabled ? "" : "disabled"}" data-fid="${f.id}">
       <div class="fr-main">
-        <input class="fr-name" value="${escapeHtml(f.name)}" maxlength="80" />
+        <input class="fr-name" value="${escapeHtml(f.name)}" maxlength="80" placeholder="Name" />
+        <input class="fr-bday" type="date" value="${escapeHtml(f.birthday || "")}"
+               title="Birthday — the friend signs in with name + birthday" />
         <select class="fr-tier">${tierOpts(f.tier)}</select>
         <label class="fr-enabled"><input type="checkbox" class="fr-on" ${f.enabled ? "checked" : ""}/> active</label>
       </div>
+      ${f.birthday ? "" : `<div class="fr-warn">No birthday set — this friend can't sign in yet.</div>`}
       <div class="fr-actions">
-        <button class="mini-btn" data-copy="${escapeHtml(f.invite_link)}">Copy link</button>
+        <button class="mini-btn" data-copy="${escapeHtml(f.invite_link)}" title="Legacy invite link (still works)">Copy link</button>
         <button class="mini-btn" data-rotate="${f.id}" title="Invalidate the old link, make a new one">Rotate</button>
         <button class="mini-btn ok" data-save="${f.id}">Save</button>
         <button class="mini-btn danger" data-delf="${f.id}">Delete</button>
@@ -594,12 +640,14 @@ async function openFriends() {
 
   openModal(`
     <div class="modal-head"><h2>Friends</h2><button class="icon-btn" data-close>✕</button></div>
-    <p class="modal-sub">Each friend gets their own link. Tier sets how much they see:
+    <p class="modal-sub">Each friend signs in with their <b>name + birthday</b>, so set both.
+      Tier sets how much they see:
       <b>busy</b> = only “unavailable”, <b>basic</b> = destination + free seats,
       <b>full</b> = + who's coming, notes, and can request a seat.</p>
     <div class="friend-list">${rows || `<div class="muted">No friends yet.</div>`}</div>
     <div class="friend-add">
       <input id="nf-name" placeholder="New friend's name" maxlength="80" />
+      <input id="nf-bday" type="date" title="Birthday (used with name to sign in)" />
       <select id="nf-tier">${tierOpts("basic")}</select>
       <button class="btn btn-primary" id="nf-add">Add friend</button>
     </div>`, { wide: true });
@@ -613,6 +661,7 @@ async function openFriends() {
     const row = b.closest(".friend-row");
     const body = {
       name: row.querySelector(".fr-name").value.trim(),
+      birthday: row.querySelector(".fr-bday").value,   // "" clears it server-side
       tier: row.querySelector(".fr-tier").value,
       enabled: row.querySelector(".fr-on").checked,
     };
@@ -633,9 +682,11 @@ async function openFriends() {
   });
   document.getElementById("nf-add").onclick = async () => {
     const name = document.getElementById("nf-name").value.trim();
+    const birthday = document.getElementById("nf-bday").value;
     const tier = document.getElementById("nf-tier").value;
     if (!name) return toast("Enter a name.", "error");
-    try { await API.createFriend({ name, tier }); invalidateFriends(); toast("Friend added.", "ok"); openFriends(); }
+    if (!birthday) return toast("Set a birthday so they can sign in.", "error");
+    try { await API.createFriend({ name, birthday, tier }); invalidateFriends(); toast("Friend added.", "ok"); openFriends(); }
     catch (e) { toast(msg(e), "error"); }
   };
 }

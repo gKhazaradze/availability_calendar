@@ -117,12 +117,16 @@ Then in a browser:
 1. Open `https://availability.georgelands.com` → the **public calendar**: days
    I'm away are blocked out as *Busy* with no trip details.
 2. Click **Owner**, enter the `ADMIN_KEY`.
-3. Add a friend at each tier; **copy each invite link**.
+3. Add a friend at each tier, **giving each a birthday** (that's their login).
 4. Create a ski day and a multi-day stay; add a guest.
-5. Open each invite link in a separate **incognito** window and confirm:
+5. In a separate **incognito** window, click **Sign in**, enter that friend's
+   name + birthday, and confirm:
    - `busy` sees only "unavailable" days,
    - `basic` sees destination + free seats but no names,
    - `full` sees names/notes and can **request a seat**.
+
+   (Legacy `?u=<token>` invite links still work as a fallback — **copy link** in
+   the Friends drawer — but name + birthday is the way friends sign in now.)
 6. As the `full` friend, request a seat; back as owner, **approve** it in
    **Requests** — the free-seat count drops and the name appears.
 
@@ -138,8 +142,15 @@ matches the Caddyfile block. Logs: `cd /srv/availability && docker compose logs 
 After changing `.env`, `cd /srv/availability && docker compose up -d` to recreate
 the container with the new value.
 
-**A friend's link stopped working.** You rotated or disabled them, or deleted the
-friend. Re-enable/rotate in **Friends** and re-share the new link.
+**A friend can't sign in.** Sign-in is name + birthday, matched exactly (name is
+case-insensitive). Check the friend has a **birthday set** in the **Friends**
+drawer and that they're **active**. After 10 wrong tries from one IP, sign-in is
+locked for ~15 minutes — wait it out. (Two friends sharing the same name *and*
+birthday can't sign in either; give one a distinct record.)
+
+**A friend's link stopped working.** Invite links still work as a fallback. You
+rotated or disabled them, or deleted the friend. Re-enable/rotate in **Friends**
+and re-share the new link — or just have them sign in with name + birthday.
 
 **Lost the admin key.** Read it from the server: `sudo cat /srv/availability/.env`.
 

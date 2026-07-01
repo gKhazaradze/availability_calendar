@@ -10,9 +10,13 @@ Two credential types (the one real departure from the roadtrip template):
 
   - Owner (George): the `X-Admin-Key` header, constant-time compared to the
     ADMIN_KEY env var. Full CRUD on trips/friends/participants; sees everything.
-  - Friend: a per-friend secret token in the `X-User-Token` header. The token is
-    only an identifier — the friend's tier and enabled-state are re-read from the
-    DB on every request, so a downgrade/disable takes effect immediately. Tiers:
+  - Friend: signs in at POST /api/login with their name + birthday (a low-entropy
+    shared secret, so that endpoint is per-IP rate-limited); login hands back a
+    per-friend secret token that's sent in the `X-User-Token` header thereafter.
+    The token is only an identifier — the friend's tier and enabled-state are
+    re-read from the DB on every request, so a downgrade/disable takes effect
+    immediately. (Legacy `?u=<token>` invite links still resolve the same token.)
+    Tiers:
       busy  → only that a day is unavailable (no destination/seats/people)
       basic → + destination, dates, free-seat count
       full  → + participant names, notes, and the ability to request a seat
@@ -70,6 +74,12 @@ MAX_CATEGORY = 40
 MAX_NOTES = 2000
 MAX_SEATS = 50
 MAX_RANGE_DAYS = 366          # cap on a calendar query window
+
+# Friend login (name + birthday) is a low-entropy, often-guessable credential,
+# so the endpoint is throttled per client IP: at most LOGIN_MAX_FAILS failed
+# attempts inside a rolling LOGIN_WINDOW_SEC window, after which it 429s.
+LOGIN_WINDOW_SEC = 900        # 15 minutes
+LOGIN_MAX_FAILS = 10          # failed logins per IP per window before lockout
 
 TIERS = ("busy", "basic", "full")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -131,12 +141,21 @@ def writing():
 
 
 def init_db():
-    """Create tables if the database file doesn't exist yet."""
+    """Create tables if the database file doesn't exist yet, and run migrations.
+
+    executescript() creates any missing table (schema.sql is all IF NOT EXISTS),
+    so a fresh DB gets the `birthday` column and login_attempts table for free.
+    An *existing* DB already has a friends table, so CREATE IF NOT EXISTS is a
+    no-op there — the ALTER below back-fills the birthday column on those.
+    """
     first_run = not Path(DATABASE_PATH).exists()
     conn = sqlite3.connect(DATABASE_PATH)
     try:
         with open(SCHEMA_PATH) as f:
             conn.executescript(f.read())
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(friends)").fetchall()}
+        if "birthday" not in cols:
+            conn.execute("ALTER TABLE friends ADD COLUMN birthday TEXT")
         conn.commit()
         if first_run:
             app.logger.info(f"Initialized new database at {DATABASE_PATH}")
@@ -240,6 +259,30 @@ def require_viewer():
     return viewer
 
 
+# ─── Login throttle (DB-backed so it holds across gunicorn workers) ─────────
+
+def client_ip():
+    """Client IP for the login throttle. The app always sits behind exactly one
+    trusted proxy (the platform's Caddy edge), which *appends* the real peer to
+    X-Forwarded-For. So the LAST entry is the client IP Caddy observed and is
+    unspoofable; anything to its left was supplied by the client and must be
+    ignored — taking the first entry would let an attacker rotate a fake value
+    to sidestep the per-IP limit entirely. Falls back to remote_addr for direct
+    or dev access with no proxy header."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[-1].strip()
+    return request.remote_addr or "?"
+
+
+def login_recent_fails(db, ip):
+    return db.execute(
+        "SELECT COUNT(*) AS n FROM login_attempts "
+        "WHERE ip = ? AND created_at > datetime('now', ?)",
+        (ip, f"-{LOGIN_WINDOW_SEC} seconds"),
+    ).fetchone()["n"]
+
+
 # ─── Validation helpers ────────────────────────────────────────────────────
 
 def valid_date(s):
@@ -250,6 +293,17 @@ def valid_date(s):
         return True
     except ValueError:
         return False
+
+
+def parse_birthday(value):
+    """Normalize a friend's birthday for storage. None/"" → NULL (a link-only
+    friend who can't use name+birthday login); a valid 'YYYY-MM-DD' → itself;
+    anything else → 400."""
+    if value is None or value == "":
+        return None
+    if not valid_date(value):
+        fail(400, "bad_birthday")
+    return value
 
 
 def clean_str(value, max_len, *, allow_empty=False, default=""):
@@ -428,10 +482,14 @@ def project_trip(trip, viewer, db):
 
 
 def friend_public(row, base_url):
-    """Owner-facing friend record incl. token + ready-to-share invite link."""
+    """Owner-facing friend record incl. token, birthday, and a fallback link.
+
+    invite_link stays for backward compatibility (already-shared links keep
+    working), but the friend-facing sign-in is now name + birthday."""
     return {
         "id": row["id"],
         "name": row["name"],
+        "birthday": row["birthday"],
         "tier": row["tier"],
         "enabled": bool(row["enabled"]),
         "token": row["token"],
@@ -459,6 +517,69 @@ def me():
     if viewer["role"] == "owner":
         return jsonify(role="owner")
     return jsonify(role="friend", name=viewer["name"], tier=viewer["tier"])
+
+
+@app.route("/api/login", methods=["POST"])
+def login():
+    """Friend sign-in by name + birthday → hands back the friend's bearer token.
+
+    The token (not name+birthday) is the credential used on every later request,
+    so all the tier/enabled machinery in get_viewer() is unchanged — this only
+    adds a guessable *way to obtain* it, which is exactly why it's throttled.
+
+    A match must be EXACTLY one enabled friend. Zero matches (wrong birthday /
+    unknown name) and the vanishingly-rare ambiguous case (two enabled friends
+    sharing a name AND birthday) both fail identically as `bad_login`, so the
+    response shape leaks nothing about which half was wrong or whether a name
+    exists. Every failure feeds the per-IP throttle.
+    """
+    body = request.get_json(silent=True) or {}
+    name = clean_str(body.get("name"), MAX_NAME)
+    birthday = body.get("birthday")
+    if not valid_date(birthday):
+        fail(400, "bad_birthday")
+
+    ip = client_ip()
+    # The throttle gate and the attempt record must be consistent, so the whole
+    # count → lookup → record runs under ONE writer lock (BEGIN IMMEDIATE). The
+    # gunicorn workers are separate processes, so a read-then-write across two
+    # transactions would let two of them both pass a near-limit gate and each
+    # record a miss, nudging the count past LOGIN_MAX_FAILS — exactly the "read
+    # in Python, then write" pattern this app forbids. Serializing logins on the
+    # writer lock is free (they're rare) and makes the limit exact.
+    throttled = False
+    matched = None
+    with writing() as w:
+        if login_recent_fails(w, ip) >= LOGIN_MAX_FAILS:
+            throttled = True
+        else:
+            rows = w.execute(
+                "SELECT name, tier, token FROM friends "
+                "WHERE name = ? COLLATE NOCASE AND birthday = ? AND enabled = 1",
+                (name, birthday),
+            ).fetchall()
+            if len(rows) == 1:
+                matched = rows[0]
+                # Clear the streak on a clean login so an honest fumble before
+                # success doesn't count toward a later lockout.
+                w.execute("DELETE FROM login_attempts WHERE ip = ?", (ip,))
+            else:
+                # Zero matches (wrong birthday / unknown name) or the ambiguous
+                # same-name-same-birthday case: record the miss (throttle fuel)
+                # and prune day-old rows to keep the table small.
+                w.execute(
+                    "INSERT INTO login_attempts (ip, created_at) VALUES (?, datetime('now'))",
+                    (ip,),
+                )
+                w.execute("DELETE FROM login_attempts WHERE created_at < datetime('now', '-1 day')")
+
+    # fail()/return AFTER the transaction commits — calling fail() inside would
+    # roll back the very attempt we just recorded (writing() rolls back on abort).
+    if throttled:
+        fail(429, "too_many_attempts")
+    if matched is not None:
+        return jsonify(token=matched["token"], name=matched["name"], tier=matched["tier"])
+    fail(401, "bad_login")
 
 
 # ─── API: calendar (tier-projected reads) ──────────────────────────────────
@@ -796,12 +917,13 @@ def admin_create_friend():
     tier = body.get("tier")
     if tier not in TIERS:
         fail(400, "bad_tier")
+    birthday = parse_birthday(body.get("birthday"))
     token = secrets.token_urlsafe(24)
     with writing() as db:
         cur = db.execute(
-            "INSERT INTO friends (name, token, tier, enabled, created_at) "
-            "VALUES (?, ?, ?, 1, datetime('now'))",
-            (name, token, tier),
+            "INSERT INTO friends (name, token, birthday, tier, enabled, created_at) "
+            "VALUES (?, ?, ?, ?, 1, datetime('now'))",
+            (name, token, birthday, tier),
         )
         fid = cur.lastrowid
     db = get_db()
@@ -828,6 +950,7 @@ def admin_update_friend(fid):
         tier = body.get("tier") if "tier" in body else friend["tier"]
         if tier not in TIERS:
             fail(400, "bad_tier")
+        birthday = parse_birthday(body["birthday"]) if "birthday" in body else friend["birthday"]
         enabled = friend["enabled"]
         if "enabled" in body:
             if not isinstance(body["enabled"], bool):
@@ -836,8 +959,8 @@ def admin_update_friend(fid):
         token = secrets.token_urlsafe(24) if body.get("rotate") else friend["token"]
 
         db.execute(
-            "UPDATE friends SET name = ?, tier = ?, enabled = ?, token = ? WHERE id = ?",
-            (name, tier, enabled, token, fid),
+            "UPDATE friends SET name = ?, birthday = ?, tier = ?, enabled = ?, token = ? WHERE id = ?",
+            (name, birthday, tier, enabled, token, fid),
         )
         if tier != "full" or enabled == 0:
             db.execute(

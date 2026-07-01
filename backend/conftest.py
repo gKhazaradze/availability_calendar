@@ -41,9 +41,16 @@ def client(tmp_path, monkeypatch):
 
 @pytest.fixture
 def make_friend(client):
-    """Create a friend via the admin API; returns the friend dict (incl token)."""
-    def _make(name="Friend", tier="full"):
-        r = client.post("/api/admin/friends", json={"name": name, "tier": tier}, headers=ADMIN)
+    """Create a friend via the admin API; returns the friend dict (incl token).
+
+    Pass birthday='YYYY-MM-DD' to make the friend usable with name+birthday
+    login; omit it for the token-only friends most tier tests want.
+    """
+    def _make(name="Friend", tier="full", birthday=None):
+        body = {"name": name, "tier": tier}
+        if birthday is not None:
+            body["birthday"] = birthday
+        r = client.post("/api/admin/friends", json=body, headers=ADMIN)
         assert r.status_code == 201, r.get_json()
         return r.get_json()["friend"]
     return _make

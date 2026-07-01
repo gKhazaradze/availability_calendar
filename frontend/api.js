@@ -69,6 +69,26 @@ const API = (() => {
   function isOwner() { return !!adminKey; }
   function hasUserToken() { return !!userToken; }
 
+  // Friend sign-in: name + birthday → a bearer token we store and send as
+  // X-User-Token thereafter (same credential the legacy ?u= link carried).
+  async function loginFriend(name, birthday) {
+    const resp = await fetch(BASE + "/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: (name || "").trim(), birthday: (birthday || "").trim() }),
+    });
+    let data = null;
+    try { data = await resp.json(); } catch (e) { /* non-JSON */ }
+    if (!resp.ok) {
+      const e = new Error((data && data.error) || ("HTTP " + resp.status));
+      e.status = resp.status; e.code = data && data.error;
+      throw e;
+    }
+    userToken = data.token;
+    localStorage.setItem(TOKEN_STORE, userToken);
+    return data;   // { token, name, tier }
+  }
+
   async function loginOwner(candidate) {
     const key = (candidate || "").trim();
     if (!key) throw new Error("Enter the admin key.");
@@ -134,7 +154,7 @@ const API = (() => {
 
   return {
     captureInviteToken, whoami, isOwner, hasUserToken,
-    loginOwner, logoutOwner, forgetUser,
+    loginFriend, loginOwner, logoutOwner, forgetUser,
     getCalendar, getTrip,
     requestSeat, leaveTrip,
     adminTrips, createTrip, updateTrip, deleteTrip,

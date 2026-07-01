@@ -12,13 +12,17 @@
 
 PRAGMA foreign_keys = ON;
 
--- ─── Friends (per-person accounts, passwordless) ──────────────────────────
+-- ─── Friends (per-person accounts) ─────────────────────────────────────────
+-- Login is name + birthday (a low-entropy shared secret — see /api/login).
+-- The `token` is no longer shared as a link; it's the internal bearer credential
+-- a successful login hands back, kept in the browser and sent as X-User-Token.
 CREATE TABLE IF NOT EXISTS friends (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   name       TEXT    NOT NULL,
-  token      TEXT    NOT NULL UNIQUE,             -- secrets.token_urlsafe(24)
+  token      TEXT    NOT NULL UNIQUE,             -- secrets.token_urlsafe(24); session credential
+  birthday   TEXT,                                -- 'YYYY-MM-DD'; name+birthday is the login secret (NULL = can't log in)
   tier       TEXT    NOT NULL CHECK (tier IN ('busy','basic','full')),
-  enabled    INTEGER NOT NULL DEFAULT 1,          -- 0 = revoked, token 401s
+  enabled    INTEGER NOT NULL DEFAULT 1,          -- 0 = revoked, token + login 401
   created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -64,3 +68,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_participants_active
   WHERE status IN ('pending','confirmed') AND friend_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_participants_trip ON participants (trip_id);
+
+-- ─── Login attempts (rate-limit fuel for /api/login) ───────────────────────
+-- Name+birthday is a guessable credential, so the login endpoint is throttled
+-- per client IP. Attempts live in the DB (not process memory) because gunicorn
+-- runs multiple worker processes that share nothing else — an in-memory counter
+-- would only throttle one worker. Old rows are pruned opportunistically on write.
+CREATE TABLE IF NOT EXISTS login_attempts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ip         TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, created_at);
