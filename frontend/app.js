@@ -2,7 +2,8 @@
 // Availability calendar UI. Three modes, decided by GET /api/me:
 //   owner   → full calendar + edit controls + admin (trips, friends, requests)
 //   friend  → tier-scoped calendar + (full tier) request-a-seat
-//   anon    → locked landing
+//   anon    → the same calendar, but every trip shows only as a "Busy" span
+//             (dates blocked out, no detail) — ask for a link to see more
 // All visibility is enforced server-side; this file only renders whatever the
 // projection returned and never assumes hidden fields exist.
 
@@ -112,7 +113,7 @@ async function init() {
   }
 
   renderHeader();
-  if (state.viewer.role === "anon") { renderLocked(); return; }
+  // Anon included: the calendar itself is public, projected down to busy spans.
   state.cursor = startOfMonth(new Date());
   await loadAndRender();
 }
@@ -141,21 +142,6 @@ function renderHeader() {
     c.innerHTML = `<button class="btn btn-ghost" id="btn-owner">Owner</button>`;
     c.querySelector("#btn-owner").onclick = openOwnerLogin;
   }
-}
-
-// ─── LOCKED LANDING (anon) ────────────────────────────────────────────────
-
-function renderLocked() {
-  document.getElementById("main-content").innerHTML = `
-    <section class="locked">
-      <div class="locked-card">
-        <div class="locked-icon">🔒</div>
-        <h1>This calendar is private</h1>
-        <p>Ask George for your personal link to see when he's around and where there's a free seat.</p>
-        <button class="btn btn-ghost" id="locked-owner">I'm the owner</button>
-      </div>
-    </section>`;
-  document.getElementById("locked-owner").onclick = openOwnerLogin;
 }
 
 // ─── OWNER LOGIN ──────────────────────────────────────────────────────────
@@ -269,6 +255,8 @@ function renderCalendar() {
 
   const legend = state.viewer.role === "owner"
     ? `<span class="legend-hint">Click a day to add a trip · click a trip to manage it</span>`
+    : state.viewer.role === "anon"
+    ? `<span class="legend-hint">Marked days are unavailable · ask George for a personal link to see details</span>`
     : `<span class="legend-hint">Click a marked day for details${state.viewer.tier === "full" ? " · request a seat" : ""}</span>`;
 
   document.getElementById("main-content").innerHTML = `
@@ -327,7 +315,7 @@ function renderTripCard(t) {
   const owner = state.viewer.role === "owner";
 
   if (!t.destination) {
-    // busy-only projection (busy tier, or a busy_only trip seen by a friend)
+    // busy-only projection (anon, busy tier, or a busy_only trip seen by a friend)
     return `<div class="trip-card busy ${t.on_trip ? "mine" : ""}">
       <div class="tc-title"><span class="tc-dot ${t.on_trip ? "mine" : "busy"}"></span>${t.on_trip ? "You're away this day" : "Unavailable"}</div>
       <div class="tc-dates">${escapeHtml(fmtRange(t.start_date, t.end_date))}</div>

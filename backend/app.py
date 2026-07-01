@@ -16,7 +16,10 @@ Two credential types (the one real departure from the roadtrip template):
       busy  → only that a day is unavailable (no destination/seats/people)
       basic → + destination, dates, free-seat count
       full  → + participant names, notes, and the ability to request a seat
-  - Anonymous: no credential → 401 on the API; the frontend shows a locked page.
+  - Anonymous: no credential. May READ the calendar, but every trip collapses to
+    a bare busy span (dates only) — the same shape the busy tier sees, so the
+    public learns *when* George is away but nothing about the trip. Everything
+    else (/api/me, request-seat, all /api/admin/*) still 401s for anon.
 
 Two cross-cutting invariants (see the project plan / design review):
 
@@ -346,9 +349,9 @@ def project_trip(trip, viewer, db):
     is_owner = viewer["role"] == "owner"
     tier = viewer["tier"]
 
-    # The always-visible minimum: a busy span. Anyone authenticated learns that
-    # a day is unavailable (that's the busy tier's entire purpose) — but nothing
-    # about what's happening.
+    # The always-visible minimum: a busy span. Every viewer — even an anonymous
+    # one with no link — learns only that a day is unavailable (the busy tier's
+    # entire purpose), never anything about what's happening.
     out = {
         "id": trip["id"],
         "start_date": trip["start_date"],
@@ -464,11 +467,15 @@ def me():
 def calendar():
     """Trips overlapping [from, to], projected to the caller's tier.
 
+    Open to anonymous callers: with no credential every trip collapses to a bare
+    busy span (dates only), so the public sees when George is away but nothing
+    about the trip. Detail requires a friend/owner credential.
+
     Uses an OVERLAP test (start <= :to AND end >= :from), not containment, so a
     multi-day trip that began before the window but is still ongoing inside it
     is included.
     """
-    viewer = require_viewer()
+    viewer = get_viewer()   # anon allowed — projected down to a busy span
     frm = request.args.get("from", "")
     to = request.args.get("to", "")
     if not valid_date(frm) or not valid_date(to):

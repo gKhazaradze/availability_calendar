@@ -27,6 +27,11 @@ server-side** — a lower tier is never sent fields it shouldn't see.
 A trip can also be marked **private** (`busy_only`), which collapses it to
 "unavailable" for *everyone* but me — even full-tier friends.
 
+Anyone who opens the bare link with **no personal invite** still gets a public
+view of the same calendar, but every trip collapses to an opaque **busy** span —
+the days are blocked out with no destination, seats, or people. Seeing any detail
+requires a per-friend link.
+
 ## Two credentials
 
 | Who | Credential | How |
@@ -103,7 +108,7 @@ pytest -q                              # run the tests
 | `GET`  | `/api/health` | none | Health check |
 | `POST` | `/api/admin/verify` | admin | Validate the admin key |
 | `GET`  | `/api/me` | friend/owner | Who am I + my tier |
-| `GET`  | `/api/calendar?from=&to=` | friend/owner | Tier-projected trips in a range |
+| `GET`  | `/api/calendar?from=&to=` | public | Trips in a range, projected to the caller (anon → busy spans only) |
 | `GET`  | `/api/trips/:id` | friend/owner | Tier-projected single trip |
 | `POST` | `/api/trips/:id/request-seat` | friend (full) | Request a seat |
 | `DELETE` | `/api/requests/:id` | friend | Cancel own pending request |

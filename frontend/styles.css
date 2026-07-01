@@ -78,13 +78,6 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 
-/* ─── Locked landing ─── */
-.locked { display: flex; justify-content: center; padding: 60px 0; }
-.locked-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 40px; text-align: center; max-width: 440px; }
-.locked-icon { font-size: 44px; }
-.locked-card h1 { margin: 12px 0 8px; font-size: 22px; }
-.locked-card p { color: var(--muted); margin: 0 0 20px; }
-
 /* ─── Calendar ─── */
 .cal-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
 .cal-title { display: flex; align-items: center; gap: 10px; }

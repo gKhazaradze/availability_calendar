@@ -32,9 +32,31 @@ def test_admin_endpoints_gated(client):
     assert client.get("/api/admin/trips", headers=ADMIN).status_code == 200
 
 
-def test_anonymous_calendar_is_401(client):
+def test_anonymous_calendar_shows_busy_spans_without_detail(client, make_trip):
+    # A richly-detailed trip...
+    make_trip(destination="SecretValley", car_seats=3, notes="leaving 6am",
+              start_date="2026-01-12", end_date="2026-01-14")
+    # ...is visible to an anonymous viewer only as an opaque busy span.
     r = client.get("/api/calendar?from=2026-01-01&to=2026-01-31")
-    assert r.status_code == 401
+    assert r.status_code == 200
+    trips = r.get_json()["trips"]
+    assert len(trips) == 1
+    t = trips[0]
+    assert t["status"] == "busy"
+    assert t["start_date"] == "2026-01-12" and t["end_date"] == "2026-01-14"
+    for forbidden in ("destination", "location_label", "car_seats", "free_seats",
+                      "participants", "notes", "category", "on_trip", "my_status",
+                      "can_request"):
+        assert forbidden not in t, forbidden
+    # Nothing sensitive in the raw body either.
+    assert b"SecretValley" not in r.data and b"leaving 6am" not in r.data
+
+
+def test_anonymous_me_and_admin_still_401(client):
+    # The public read is calendar-only; identity + admin stay gated so the
+    # frontend still resolves an anonymous visitor as "anon".
+    assert client.get("/api/me").status_code == 401
+    assert client.get("/api/admin/trips").status_code == 401
 
 
 def test_me_reports_role_and_tier(client, make_friend):

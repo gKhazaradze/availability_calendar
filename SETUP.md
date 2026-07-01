@@ -103,14 +103,19 @@ the box's `~/.ssh/authorized_keys`). From now on, **push to `main` redeploys**.
 # Public health over HTTPS (through Caddy):
 curl -sf https://availability.georgelands.com/api/health        # {"ok":true,"version":"1.0.0"}
 
-# Anonymous API is locked:
+# Anonymous calendar is public but detail-free — every trip is a bare busy span:
+curl -s "https://availability.georgelands.com/api/calendar?from=2026-01-01&to=2026-01-31"
+#   200 — trips carry only {start_date,end_date,status:"busy"}; no destination/seats/notes
+
+# Identity + admin stay locked to anonymous callers:
 curl -s -o /dev/null -w '%{http_code}\n' \
-  "https://availability.georgelands.com/api/calendar?from=2026-01-01&to=2026-01-31"   # 401
+  "https://availability.georgelands.com/api/me"                 # 401
 ```
 
 Then in a browser:
 
-1. Open `https://availability.georgelands.com` → the **locked landing** page.
+1. Open `https://availability.georgelands.com` → the **public calendar**: days
+   I'm away are blocked out as *Busy* with no trip details.
 2. Click **Owner**, enter the `ADMIN_KEY`.
 3. Add a friend at each tier; **copy each invite link**.
 4. Create a ski day and a multi-day stay; add a guest.
