@@ -346,6 +346,47 @@ def test_tier_downgrade_declines_pending(client, make_friend, make_trip):
     assert client.get("/api/admin/requests", headers=ADMIN).get_json()["requests"] == []
 
 
+def test_friend_rename_propagates_to_participants(client, make_friend, make_trip):
+    # A friend's name is snapshotted onto each trip they're on; renaming the
+    # friend must update those snapshots everywhere — no remove-and-re-add.
+    t = make_trip(car_seats=3)
+    f = make_friend(name="Old Name", tier="full")
+    client.post(f"/api/admin/trips/{t['id']}/participants",
+                json={"friend_id": f["id"]}, headers=ADMIN)
+    client.put(f"/api/admin/friends/{f['id']}", json={"name": "New Name"}, headers=ADMIN)
+    # Owner roster reflects the new name.
+    owner_trip = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert [p["display_name"] for p in owner_trip["participants"]] == ["New Name"]
+    # A full-tier friend viewing the trip sees it too.
+    viewer = make_friend(name="Viewer", tier="full")
+    seen = _trip_for(client, viewer["token"], t["id"])
+    assert seen["participants"] == [{"name": "New Name"}]
+
+
+def test_friend_rename_moves_pending_and_declined_rows(client, make_friend, make_trip):
+    # The snapshot follows the rename on ANY linked row, not just confirmed ones.
+    t = make_trip(car_seats=3)
+    f = make_friend(name="Old", tier="full")
+    client.post(f"/api/trips/{t['id']}/request-seat", headers=friend_headers(f["token"]))
+    client.put(f"/api/admin/friends/{f['id']}", json={"name": "Renamed"}, headers=ADMIN)
+    names = [r["display_name"] for r in
+             client.get("/api/admin/requests", headers=ADMIN).get_json()["requests"]]
+    assert names == ["Renamed"]                 # pending request row moved with the rename
+
+
+def test_friend_rename_leaves_unlinked_guests_untouched(client, make_friend, make_trip):
+    # An owner-added guest (no friend_id) sharing the old name is independent.
+    t = make_trip(car_seats=3)
+    f = make_friend(name="Sam", tier="full")
+    client.post(f"/api/admin/trips/{t['id']}/participants",
+                json={"friend_id": f["id"]}, headers=ADMIN)
+    client.post(f"/api/admin/trips/{t['id']}/participants",
+                json={"name": "Sam"}, headers=ADMIN)          # unlinked guest
+    client.put(f"/api/admin/friends/{f['id']}", json={"name": "Samuel"}, headers=ADMIN)
+    owner_trip = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert sorted(p["display_name"] for p in owner_trip["participants"]) == ["Sam", "Samuel"]
+
+
 def test_delete_trip_cascades_participants(client, make_trip):
     t = make_trip(car_seats=2)
     client.post(f"/api/admin/trips/{t['id']}/participants", json={"name": "Alex"}, headers=ADMIN)

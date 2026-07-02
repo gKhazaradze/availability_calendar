@@ -935,6 +935,10 @@ def admin_create_friend():
 def admin_update_friend(fid):
     """Edit name/tier/enabled and/or rotate the token.
 
+    A rename propagates to the friend's participant rows (display_name is a
+    snapshot, so their name on every trip — confirmed, pending, or declined —
+    follows the rename). Guest rows (no friend_id) are independent and untouched.
+
     If the friend ends up below 'full' tier or disabled, their PENDING requests
     are declined (only a full, enabled friend may hold a live request) so the
     seat math stays correct. Confirmed seats are left in place.
@@ -962,6 +966,14 @@ def admin_update_friend(fid):
             "UPDATE friends SET name = ?, birthday = ?, tier = ?, enabled = ?, token = ? WHERE id = ?",
             (name, birthday, tier, enabled, token, fid),
         )
+        if name != friend["name"]:
+            # Keep the snapshot names on this friend's calendar entries in sync
+            # so a rename shows up everywhere without a remove-and-re-add. Only
+            # linked rows (friend_id = fid) move; unlinked guests keep their name.
+            db.execute(
+                "UPDATE participants SET display_name = ? WHERE friend_id = ?",
+                (name, fid),
+            )
         if tier != "full" or enabled == 0:
             db.execute(
                 "UPDATE participants SET status = 'declined', decided_at = datetime('now') "

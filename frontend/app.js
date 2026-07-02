@@ -679,7 +679,13 @@ async function openFriends() {
       tier: row.querySelector(".fr-tier").value,
       enabled: row.querySelector(".fr-on").checked,
     };
-    try { await API.updateFriend(+b.dataset.save, body); invalidateFriends(); toast("Saved.", "ok"); openFriends(); }
+    try {
+      await API.updateFriend(+b.dataset.save, body);
+      invalidateFriends(); toast("Saved.", "ok"); openFriends();
+      // A rename/tier change alters participant names & seat math on trips, so
+      // refresh the calendar underneath the drawer — the edit shows up at once.
+      if (state.cursor) loadCalendarSilently();
+    }
     catch (e) { toast(msg(e), "error"); }
   });
   root.querySelectorAll("[data-rotate]").forEach(b => b.onclick = async () => {
