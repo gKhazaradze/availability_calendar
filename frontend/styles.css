@@ -257,10 +257,15 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .leaflet-container { font-family: inherit; background: var(--surface-2); }
 @media (max-width: 640px) { .tc-map { height: 190px; } .map-editor { height: 220px; } }
 
+/* drag-to-reorder handles (activities + pin rows in the trip form) */
+.drag-handle { cursor: grab; color: var(--faint); user-select: none; -webkit-user-select: none; touch-action: none; font-size: 13px; line-height: 1; padding: 2px; }
+.drag-handle:hover { color: var(--text); }
+.drag-handle:active { cursor: grabbing; }
+.act-row.dragging, .pin-row.dragging { opacity: .55; }
+
 /* form: activities editor */
 .act-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 7px; }
 .act-row { display: flex; align-items: center; gap: 8px; }
-.act-bullet { color: var(--faint); }
 .act-row input { flex: 1; min-width: 0; background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: 14px; font-family: inherit; }
 .act-row input:focus { outline: none; border-color: var(--primary); }
 

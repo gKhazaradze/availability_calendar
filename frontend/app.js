@@ -194,6 +194,50 @@ function closeModal() {
 }
 function escClose(e) { if (e.key === "Escape") closeModal(); }
 
+// ─── DRAG-SORT (pointer events — mouse and touch alike) ───────────────────
+// Rows drag by their .drag-handle: DOM order follows the pointer live, and
+// onDone(from, to) fires on release. One delegated listener per container, so
+// rows can be re-rendered freely between drags. (HTML5 drag-and-drop is
+// deliberately avoided — it doesn't work on mobile touch.)
+
+function moveItem(arr, from, to) { const [x] = arr.splice(from, 1); arr.splice(to, 0, x); }
+
+function makeSortable(container, onDone) {
+  if (!container) return;
+  container.addEventListener("pointerdown", e => {
+    const handle = e.target.closest(".drag-handle");
+    if (!handle || e.button > 0 || !container.contains(handle)) return;
+    let row = handle;
+    while (row.parentElement && row.parentElement !== container) row = row.parentElement;
+    if (row.parentElement !== container) return;
+    e.preventDefault();   // no text selection; touch-action:none on the handle stops scroll
+    const from = [...container.children].indexOf(row);
+    row.classList.add("dragging");
+
+    const move = ev => {
+      ev.preventDefault();
+      // Insert before the first sibling whose midpoint is below the pointer.
+      for (const sib of container.children) {
+        if (sib === row) continue;
+        const b = sib.getBoundingClientRect();
+        if (ev.clientY < b.top + b.height / 2) { container.insertBefore(row, sib); return; }
+      }
+      container.appendChild(row);
+    };
+    const up = () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      document.removeEventListener("pointercancel", up);
+      row.classList.remove("dragging");
+      const to = [...container.children].indexOf(row);
+      if (to !== from) onDone(from, to);
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+    document.addEventListener("pointercancel", up);
+  });
+}
+
 // ─── BOOT ─────────────────────────────────────────────────────────────────
 
 // The platform homepage lives on the apex domain; this app is a subdomain
@@ -879,7 +923,7 @@ function openTripForm(trip, prefill = {}) {
   function redrawActs() {
     actsBox.innerHTML = geo.acts.map((a, i) => `
       <div class="act-row">
-        <span class="act-bullet">•</span>
+        <span class="drag-handle" title="Drag to reorder">⠿</span>
         <input type="text" data-act="${i}" value="${escapeHtml(a)}" maxlength="120" placeholder="Skiing, sauna, board games…" />
         <button type="button" class="mini-btn danger" data-act-del="${i}" title="Remove">✕</button>
       </div>`).join("");
@@ -896,10 +940,25 @@ function openTripForm(trip, prefill = {}) {
     actsBox.querySelector(`[data-act="${geo.acts.length - 1}"]`)?.focus();
   };
   redrawActs();
+  // Reorder activities by dragging. Pin links follow their activity: build the
+  // old-index → new-index map for the same move and rewrite p.activity.
+  makeSortable(actsBox, (from, to) => {
+    const order = geo.acts.map((_, i) => i);
+    moveItem(order, from, to);
+    moveItem(geo.acts, from, to);
+    const newPos = new Map(order.map((oldIdx, pos) => [oldIdx, pos]));
+    geo.pins.forEach(p => { if (p.activity != null) p.activity = newPos.get(p.activity); });
+    redrawActs(); redrawPins();
+  });
 
   // ── Map editor ──
   let fmap = null, tripMarker = null, tripCircle = null, pinMarkers = [];
   const pinsBox = document.getElementById("f-pins");
+  // Reorder pins by dragging their number chip; rows and marker tooltips renumber.
+  makeSortable(pinsBox, (from, to) => {
+    moveItem(geo.pins, from, to);
+    redrawPins(); syncPinMarkers();
+  });
 
   function redrawPins() {
     if (!pinsBox) return;
@@ -909,7 +968,7 @@ function openTripForm(trip, prefill = {}) {
       .join("");
     pinsBox.innerHTML = geo.pins.map((p, i) => `
       <div class="pin-row">
-        <span class="pin-num">${i + 1}</span>
+        <span class="pin-num drag-handle" title="Drag to reorder">${i + 1}</span>
         <input type="text" data-pin-label="${i}" value="${escapeHtml(p.label || "")}" maxlength="120" placeholder="Label (e.g. lift base, chalet)" />
         <select data-pin-act="${i}" title="Linked activity">${options(i)}</select>
         <button type="button" class="mini-btn danger" data-pin-del="${i}" title="Remove pin">✕</button>
