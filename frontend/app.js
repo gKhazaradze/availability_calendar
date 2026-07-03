@@ -11,11 +11,25 @@ const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const state = {
   viewer: { role: "anon" },
+  viewAs: null,            // owner preview: null (off) | 'anon' | 'busy' | 'basic' | 'full'
   cursor: null,            // Date: first of the displayed month
   tripsById: {},           // id -> projected trip
   tripsByDay: {},          // 'YYYY-MM-DD' -> [trip, ...]
   openDay: null,           // 'YYYY-MM-DD' of the open day modal, or null
 };
+
+// The viewer the UI should render for. Normally the real viewer; while the
+// owner previews ("view as"), a synthetic friend/anon — matching the projected
+// data the server returns for view_as, so chrome and data always agree.
+// state.viewer stays the real identity (auth, header, pending badge).
+function effViewer() {
+  if (state.viewer.role === "owner" && state.viewAs) {
+    return state.viewAs === "anon"
+      ? { role: "anon", preview: true }
+      : { role: "friend", tier: state.viewAs, name: "Preview", preview: true };
+  }
+  return state.viewer;
+}
 
 const ERR = {
   seat_unavailable: "That seat just filled up.",
@@ -165,7 +179,38 @@ function projectsUrl() {
   return `${protocol}//${apex}${port ? ":" + port : ""}`;
 }
 
+// ─── THEME ──────────────────────────────────────────────────────────────
+// Dark is the default; light is opt-in and persisted. The saved theme is also
+// applied by an inline <head> script so there's no flash on load.
+const THEME_KEY = "theme";
+
+function applyTheme(theme) {
+  const light = theme === "light";
+  if (light) document.documentElement.setAttribute("data-theme", "light");
+  else document.documentElement.removeAttribute("data-theme");
+  const btn = document.getElementById("theme-toggle");
+  if (btn) {
+    btn.textContent = light ? "☾" : "☀";   // shows the mode you'd switch to
+    const label = light ? "Switch to dark mode" : "Switch to light mode";
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+}
+
+function initTheme() {
+  let saved;
+  try { saved = localStorage.getItem(THEME_KEY); } catch (e) {}
+  applyTheme(saved === "light" ? "light" : "dark");
+  const btn = document.getElementById("theme-toggle");
+  if (btn) btn.onclick = () => {
+    const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    applyTheme(next);
+  };
+}
+
 async function init() {
+  initTheme();
   API.captureInviteToken();
   const back = document.getElementById("back-to-projects");
   if (back) back.href = projectsUrl();
@@ -193,14 +238,29 @@ function renderHeader() {
   const c = document.getElementById("nav-controls");
   const v = state.viewer;
   if (v.role === "owner") {
-    c.innerHTML = `
+    // While previewing, the edit controls disappear (a friend wouldn't have
+    // them); the select doubles as the exit — pick "Owner" to come back.
+    const opts = [
+      ["", "Owner"], ["anon", "Visitor (signed out)"],
+      ["busy", "Friend · busy"], ["basic", "Friend · basic"], ["full", "Friend · full"],
+    ].map(([val, label]) =>
+      `<option value="${val}" ${(state.viewAs || "") === val ? "selected" : ""}>${label}</option>`).join("");
+    const viewAsSel = `<label class="view-as ${state.viewAs ? "active" : ""}" title="Preview the calendar as a friend would see it">
+      <span aria-hidden="true">👁</span><select id="view-as" aria-label="View calendar as">${opts}</select></label>`;
+    c.innerHTML = state.viewAs ? `
+      ${viewAsSel}
+      <span class="badge owner" id="btn-signout" title="Sign out">Owner ✕</span>` : `
       <button class="btn btn-ghost" id="btn-requests">Requests<span id="pending-badge" class="count-badge" hidden>0</span></button>
       <button class="btn btn-ghost" id="btn-friends">Friends</button>
       <button class="btn btn-primary" id="btn-new-trip">＋ Trip</button>
+      ${viewAsSel}
       <span class="badge owner" id="btn-signout" title="Sign out">Owner ✕</span>`;
-    c.querySelector("#btn-new-trip").onclick = () => openTripForm();
-    c.querySelector("#btn-friends").onclick = openFriends;
-    c.querySelector("#btn-requests").onclick = openRequests;
+    if (!state.viewAs) {
+      c.querySelector("#btn-new-trip").onclick = () => openTripForm();
+      c.querySelector("#btn-friends").onclick = openFriends;
+      c.querySelector("#btn-requests").onclick = openRequests;
+    }
+    c.querySelector("#view-as").onchange = e => setViewAs(e.target.value || null);
     c.querySelector("#btn-signout").onclick = () => { API.logoutOwner(); location.reload(); };
   } else if (v.role === "friend") {
     c.innerHTML = `
@@ -216,6 +276,15 @@ function renderHeader() {
     c.querySelector("#btn-login").onclick = openFriendLogin;
     c.querySelector("#btn-owner").onclick = openOwnerLogin;
   }
+}
+
+// Owner "view as" preview: swap the projection the server returns and re-render
+// everything (an open day modal included, so its cards flip too).
+async function setViewAs(mode) {
+  state.viewAs = mode;
+  renderHeader();
+  await loadAndRender();
+  if (mode) toast(`Previewing as ${mode === "anon" ? "a signed-out visitor" : `a ${mode}-tier friend`}.`, "info");
 }
 
 // ─── FRIEND LOGIN ─────────────────────────────────────────────────────────
@@ -306,13 +375,15 @@ async function loadAndRender() {
   const { gridStart, gridEnd } = monthGrid(state.cursor);
   let trips = [];
   try {
-    trips = await API.getCalendar(ymd(gridStart), ymd(gridEnd));
+    trips = await API.getCalendar(ymd(gridStart), ymd(gridEnd), state.viewAs);
   } catch (e) {
     if (e.status === 401) { API.logoutOwner(); return location.reload(); }
     toast(msg(e), "error");
   }
   indexTrips(trips, gridStart, gridEnd);
   renderCalendar();
+  // Real role, not effViewer(): the badge is owner chrome (and its element is
+  // absent while previewing — refreshPendingBadge no-ops then).
   if (state.viewer.role === "owner") refreshPendingBadge();
   if (state.openDay) renderDayModal(state.openDay);
 }
@@ -363,11 +434,12 @@ function renderCalendar() {
     </div>`;
   }
 
-  const legend = state.viewer.role === "owner"
+  const ev = effViewer();
+  const legend = ev.role === "owner"
     ? `<span class="legend-hint">Click a day to add a trip · click a trip to manage it</span>`
-    : state.viewer.role === "anon"
+    : ev.role === "anon"
     ? `<span class="legend-hint">Marked days are unavailable · sign in with your name and birthday to see details</span>`
-    : `<span class="legend-hint">Click a marked day for details${state.viewer.tier === "full" ? " · request a seat" : ""}</span>`;
+    : `<span class="legend-hint">Click a marked day for details${ev.tier === "full" ? " · request a seat" : ""}</span>`;
 
   document.getElementById("main-content").innerHTML = `
     <section class="cal">
@@ -393,7 +465,7 @@ function renderCalendar() {
 function onCellClick(day) {
   const trips = state.tripsByDay[day] || [];
   if (trips.length) { state.openDay = day; renderDayModal(day); }
-  else if (state.viewer.role === "owner") openTripForm(null, { start_date: day, end_date: day });
+  else if (effViewer().role === "owner") openTripForm(null, { start_date: day, end_date: day });
 }
 
 // ─── DAY DETAIL MODAL ──────────────────────────────────────────────────────
@@ -408,7 +480,7 @@ function renderDayModal(day) {
       <h2>${escapeHtml(heading)}</h2>
       <button class="icon-btn" data-close>✕</button>
     </div>
-    <div class="trip-cards">${cards}</div>`, { wide: state.viewer.role === "owner" });
+    <div class="trip-cards">${cards}</div>`, { wide: effViewer().role === "owner" });
   back.addEventListener("click", e => { if (e.target === back) state.openDay = null; });
   back.querySelector("[data-close]").addEventListener("click", () => { state.openDay = null; });
   wireTripCards();
@@ -422,7 +494,7 @@ function seatPips(free, total) {
 }
 
 function renderTripCard(t) {
-  const owner = state.viewer.role === "owner";
+  const owner = effViewer().role === "owner";
 
   if (!t.destination) {
     // busy-only projection (anon, busy tier, or a busy_only trip seen by a friend)
@@ -473,7 +545,7 @@ function renderTripCard(t) {
 //   on_trip via name match only → "you're on this trip" (George's guest; no Leave)
 //   otherwise, full tier        → Request a seat / Join waitlist
 function friendActions(t) {
-  if (state.viewer.role !== "friend") return "";
+  if (effViewer().role !== "friend") return "";
   if (t.my_status === "confirmed") {
     return `<div class="tc-actions"><span class="you-in">✓ You're on this trip</span>
       <button class="btn btn-ghost" data-leave="${t.id}">Leave trip</button></div>`;
@@ -522,8 +594,13 @@ function renderOwnerRoster(t) {
 function wireTripCards() {
   const root = document.getElementById("modal");
   if (!root) return;
-  root.querySelectorAll("[data-request]").forEach(b => b.onclick = () => act(() => API.requestSeat(+b.dataset.request), "Seat requested."));
-  root.querySelectorAll("[data-leave]").forEach(b => b.onclick = () => act(() => API.leaveTrip(+b.dataset.leave), "Removed you from the trip."));
+  // Owner previewing as a friend: the buttons render (that's the point of the
+  // preview) but must not fire real friend actions from the owner's session.
+  const previewBlock = effViewer().preview
+    ? () => { toast("Preview only — switch back to Owner to make changes.", "info"); return true; }
+    : () => false;
+  root.querySelectorAll("[data-request]").forEach(b => b.onclick = () => { if (!previewBlock()) act(() => API.requestSeat(+b.dataset.request), "Seat requested."); });
+  root.querySelectorAll("[data-leave]").forEach(b => b.onclick = () => { if (!previewBlock()) act(() => API.leaveTrip(+b.dataset.leave), "Removed you from the trip."); });
   root.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => openTripForm(state.tripsById[+b.dataset.edit]));
   root.querySelectorAll("[data-del]").forEach(b => b.onclick = () => delTrip(+b.dataset.del));
   root.querySelectorAll("[data-approve]").forEach(b => b.onclick = () => act(() => API.approveRequest(+b.dataset.approve), "Approved."));
@@ -798,7 +875,7 @@ async function openRequests() {
 async function loadCalendarSilently() {
   const { gridStart, gridEnd } = monthGrid(state.cursor);
   try {
-    const trips = await API.getCalendar(ymd(gridStart), ymd(gridEnd));
+    const trips = await API.getCalendar(ymd(gridStart), ymd(gridEnd), state.viewAs);
     indexTrips(trips, gridStart, gridEnd);
     renderCalendar();
   } catch (e) { /* ignore */ }

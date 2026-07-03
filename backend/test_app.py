@@ -429,6 +429,76 @@ def test_calendar_rejects_oversized_and_bad_range(client, make_friend):
     assert client.get("/api/calendar?from=bad&to=2026-04-01", headers=h).status_code == 400
 
 
+# ─── Owner "view as" preview (?view_as=) ──────────────────────────────────
+# The owner may ask the calendar reads to project DOWN to a tier or to anon.
+# It must be exactly the projection that audience gets, work only for the
+# owner, and never function as an upgrade for anyone else.
+
+def test_view_as_busy_downgrades_owner_to_busy_span(client, make_trip):
+    make_trip(destination="SecretValley", car_seats=3, notes="leaving 6am",
+              start_date="2026-01-12", end_date="2026-01-14")
+    r = client.get("/api/calendar?from=2026-01-01&to=2026-01-31&view_as=busy", headers=ADMIN)
+    assert r.status_code == 200
+    t = r.get_json()["trips"][0]
+    assert t["status"] == "busy"
+    for forbidden in ("destination", "location_label", "car_seats", "free_seats",
+                      "participants", "notes", "category", "privacy", "updated_at",
+                      "pending_count"):
+        assert forbidden not in t, forbidden
+    assert b"SecretValley" not in r.data and b"leaving 6am" not in r.data
+
+
+def test_view_as_anon_matches_real_anon_projection(client, make_trip):
+    t = make_trip(destination="SecretValley", car_seats=3)
+    real = client.get("/api/calendar?from=2026-01-01&to=2026-01-31").get_json()["trips"]
+    preview = client.get(
+        "/api/calendar?from=2026-01-01&to=2026-01-31&view_as=anon", headers=ADMIN
+    ).get_json()["trips"]
+    assert preview == real
+    assert "on_trip" not in preview[0] and "my_status" not in preview[0]
+    # The single-trip read honors it too (the owner can call it; anon itself can't).
+    one = client.get(f"/api/trips/{t['id']}?view_as=anon", headers=ADMIN).get_json()["trip"]
+    assert one == real[0]
+
+
+def test_view_as_full_matches_a_real_full_friend(client, make_friend, make_trip):
+    t = make_trip(destination=DEST, car_seats=3, notes="leaving 6am")
+    client.post(f"/api/admin/trips/{t['id']}/participants", json={"name": "Alex"}, headers=ADMIN)
+    f = make_friend(name="Watcher", tier="full")
+    real = client.get(
+        f"/api/trips/{t['id']}", headers=friend_headers(f["token"])
+    ).get_json()["trip"]
+    preview = client.get(f"/api/trips/{t['id']}?view_as=full", headers=ADMIN).get_json()["trip"]
+    # Identical projection — same fields, same values (Watcher isn't on the trip,
+    # and the synthetic preview friend never is).
+    assert preview == real
+    assert preview["can_request"] is True and preview["participants"] == [{"name": "Alex"}]
+
+
+def test_view_as_is_ignored_for_non_owners(client, make_friend, make_trip):
+    make_trip(destination="SecretValley", start_date="2026-01-12", end_date="2026-01-14")
+    f = make_friend(tier="busy")
+    # A busy friend can't use view_as to see more...
+    r = client.get("/api/calendar?from=2026-01-01&to=2026-01-31&view_as=full",
+                   headers=friend_headers(f["token"]))
+    assert r.status_code == 200
+    assert "destination" not in r.get_json()["trips"][0]
+    # ...and neither can an anonymous caller (param ignored, not even a 400).
+    r = client.get("/api/calendar?from=2026-01-01&to=2026-01-31&view_as=full")
+    assert r.status_code == 200
+    assert "destination" not in r.get_json()["trips"][0]
+    assert b"SecretValley" not in r.data
+
+
+def test_view_as_rejects_unknown_values(client, make_trip):
+    t = make_trip()
+    for bad in ("owner", "admin", "FULL", "x"):
+        r = client.get(f"/api/calendar?from=2026-01-01&to=2026-01-31&view_as={bad}",
+                       headers=ADMIN)
+        assert r.status_code == 400 and r.get_json()["error"] == "bad_view_as"
+        assert client.get(f"/api/trips/{t['id']}?view_as={bad}", headers=ADMIN).status_code == 400
+
+
 # ─── Friend login (name + birthday) ────────────────────────────────────────
 # Login exchanges a name+birthday for the friend's existing bearer token; the
 # token still drives every later request, so these tests cover only the new

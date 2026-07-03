@@ -113,8 +113,11 @@ const API = (() => {
 
   // ─── Reads (tier-projected server-side) ────────────────────────────────
 
-  function getCalendar(from, to) {
-    return request("GET", `/api/calendar?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
+  // viewAs (owner-only, optional): ask the server to project the response down
+  // to a tier ('busy'|'basic'|'full') or 'anon' — the "view as a friend" preview.
+  function getCalendar(from, to, viewAs) {
+    const va = viewAs ? `&view_as=${encodeURIComponent(viewAs)}` : "";
+    return request("GET", `/api/calendar?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}${va}`)
       .then(d => d.trips || []);
   }
   function getTrip(id) { return request("GET", `/api/trips/${id}`).then(d => d.trip); }

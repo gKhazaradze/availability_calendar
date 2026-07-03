@@ -1,6 +1,9 @@
 /* ─── Availability calendar — styles ─────────────────────────────────────
    No build step. Plain CSS with custom properties. Mobile-first-ish. */
 
+/* Dark is the default theme (declared on :root). Light mode overrides only the
+   color tokens under [data-theme="light"] — every rule below reads var()s, so
+   nothing else needs to know which theme is active. */
 :root {
   --bg: #0f1115;
   --surface: #171a21;
@@ -20,9 +23,37 @@
   --cat-travel: #2fbf71;
   --cat-other: #8b95a7;
 
+  --nav-bg: rgba(15, 17, 21, .9);
+
   --radius: 12px;
   --shadow: 0 10px 30px rgba(0, 0, 0, .35);
+  color-scheme: dark;
   font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f6fa;
+  --surface: #ffffff;
+  --surface-2: #eef1f6;
+  --line: #d9dfe8;
+  --text: #1a1e27;
+  --muted: #55617a;
+  --faint: #8a94a6;
+  --primary: #2f6fe0;
+  --primary-dim: #2559bd;
+  --danger: #d63946;
+  --ok: #1f9e5c;
+  --pending: #c9791a;
+
+  --cat-ski: #2f6fe0;
+  --cat-summer: #d98a12;
+  --cat-travel: #1f9e5c;
+  --cat-other: #6b7686;
+
+  --nav-bg: rgba(255, 255, 255, .85);
+
+  --shadow: 0 10px 30px rgba(20, 30, 50, .12);
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -39,11 +70,13 @@ a { color: var(--primary); }
 em { color: var(--faint); font-style: normal; font-size: 12px; }
 
 /* ─── Navbar ─── */
-.navbar { border-bottom: 1px solid var(--line); background: rgba(15, 17, 21, .9); backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 20; }
+.navbar { border-bottom: 1px solid var(--line); background: var(--nav-bg); backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 20; }
 .nav-inner { max-width: 1080px; margin: 0 auto; padding: 12px 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .logo { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text); font-weight: 700; }
 .logo-mark { color: var(--primary); }
 .nav-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.nav-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.theme-toggle { display: inline-flex; align-items: center; justify-content: center; font-size: 16px; flex: 0 0 auto; }
 
 /* ─── Buttons ─── */
 .btn { border: 1px solid var(--line); background: var(--surface-2); color: var(--text); padding: 7px 13px; border-radius: 9px; font-size: 14px; cursor: pointer; font-weight: 500; transition: .15s; font-family: inherit; }
@@ -61,6 +94,15 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .mini-btn.ok { border-color: var(--ok); color: var(--ok); }
 .mini-btn.danger { border-color: var(--danger); color: var(--danger); }
 .mini-btn:hover { filter: brightness(1.15); }
+
+/* ─── View-as (owner preview) ─── */
+.view-as { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px; padding: 0 4px 0 9px; color: var(--muted); font-size: 13px; cursor: pointer; }
+.view-as:hover { border-color: var(--faint); }
+.view-as select { background: transparent; border: none; color: var(--text); font-size: 13.5px; font-weight: 500; font-family: inherit; padding: 7px 4px; cursor: pointer; outline: none; max-width: 170px; }
+.view-as select option { background: var(--surface-2); color: var(--text); }
+/* previewing: amber accents so it's obvious the owner isn't seeing their own view */
+.view-as.active { border-color: var(--pending); color: var(--pending); }
+.view-as.active select { color: var(--pending); }
 
 /* ─── Badges ─── */
 .badge { font-size: 12px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--line); font-weight: 600; }
@@ -151,12 +193,12 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .field span { font-weight: 600; }
 .field input, .field select, .field textarea { background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 9px 11px; font-size: 14px; font-family: inherit; }
 .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--primary); }
-.field input[type="date"] { color-scheme: dark; }
+/* color-scheme is inherited from :root, so the native date picker follows the theme */
 
 /* Day-first birthday picker — three selects (Day · Month · Year), rendered the
    same on every device (a native date input orders its fields by phone region). */
 .dob { display: flex; gap: 6px; }
-.dob select { min-width: 0; background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 9px 8px; font-size: 14px; font-family: inherit; color-scheme: dark; }
+.dob select { min-width: 0; background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 9px 8px; font-size: 14px; font-family: inherit; }
 .dob select:focus { outline: none; border-color: var(--primary); }
 /* Compound selectors (0,2,0) so flex + min-width outrank .field input and
    .friend-add input (0,1,1) — else the add-row Year input keeps its min-width:140. */

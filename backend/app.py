@@ -259,6 +259,26 @@ def require_viewer():
     return viewer
 
 
+def apply_view_as(viewer):
+    """Owner-only preview: `?view_as=busy|basic|full|anon` downgrades the
+    resolved viewer to a synthetic friend at that tier (or to anonymous), so the
+    response is EXACTLY what that audience gets — same project_trip() chokepoint,
+    no separate preview code path to drift. The synthetic friend has no
+    friend_id/name, so on_trip/my_status resolve to the not-on-any-trip case.
+
+    Only ever a downgrade: non-owner callers can't use it (their own tier
+    stands), and only the calendar reads honor it — admin endpoints never do.
+    """
+    view_as = request.args.get("view_as", "").strip()
+    if not view_as or viewer["role"] != "owner":
+        return viewer
+    if view_as == "anon":
+        return {"role": "anon", "tier": None, "friend_id": None, "name": None}
+    if view_as in TIERS:
+        return {"role": "friend", "tier": view_as, "friend_id": None, "name": None}
+    fail(400, "bad_view_as")
+
+
 # ─── Login throttle (DB-backed so it holds across gunicorn workers) ─────────
 
 def client_ip():
@@ -596,7 +616,7 @@ def calendar():
     multi-day trip that began before the window but is still ongoing inside it
     is included.
     """
-    viewer = get_viewer()   # anon allowed — projected down to a busy span
+    viewer = apply_view_as(get_viewer())   # anon allowed — projected down to a busy span
     frm = request.args.get("from", "")
     to = request.args.get("to", "")
     if not valid_date(frm) or not valid_date(to):
@@ -620,7 +640,7 @@ def calendar():
 
 @app.route("/api/trips/<int:trip_id>", methods=["GET"])
 def get_trip(trip_id):
-    viewer = require_viewer()
+    viewer = apply_view_as(require_viewer())
     db = get_db()
     trip = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
     if trip is None:
