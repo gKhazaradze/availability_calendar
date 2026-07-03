@@ -111,6 +111,14 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .badge.tier-basic { color: var(--cat-travel); border-color: var(--cat-travel); }
 .badge.tier-full { color: var(--primary); border-color: var(--primary); }
 .count-badge { background: var(--pending); color: #1a1300; border-radius: 20px; padding: 0 6px; margin-left: 6px; font-size: 11px; font-weight: 700; }
+/* brief attention flash when the pending count ticks up (live request arrived) */
+.count-badge.pulse { animation: badge-pulse .7s ease-out; }
+@keyframes badge-pulse {
+  0%   { transform: scale(1); box-shadow: 0 0 0 0 rgba(245, 166, 35, .6); }
+  30%  { transform: scale(1.35); }
+  100% { transform: scale(1); box-shadow: 0 0 0 9px rgba(245, 166, 35, 0); }
+}
+@media (prefers-reduced-motion: reduce) { .count-badge.pulse { animation: none; } }
 
 /* ─── Layout ─── */
 #main-content { flex: 1; max-width: 1080px; width: 100%; margin: 0 auto; padding: 22px 18px 48px; }
@@ -204,6 +212,11 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .modal-grip:hover::before { border-color: var(--muted); }
 
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.modal-head-tools { display: flex; align-items: center; gap: 8px; }
+/* "updating live" indicator in the Requests modal — a softly breathing dot */
+.live-dot { color: var(--ok); font-size: 10px; line-height: 1; animation: live-breathe 2s ease-in-out infinite; }
+@keyframes live-breathe { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; opacity: .8; } }
 .modal h2 { margin: 0 0 4px; font-size: 19px; }
 .modal-sub { color: var(--muted); font-size: 13.5px; margin: 0 0 16px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }

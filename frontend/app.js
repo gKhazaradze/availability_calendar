@@ -366,6 +366,7 @@ async function init() {
   // Anon included: the calendar itself is public, projected down to busy spans.
   state.cursor = startOfMonth(new Date());
   await loadAndRender();
+  startLiveUpdates();   // owner: requests queue · friend: own participation · anon: no-op
 }
 
 // ─── HEADER ─────────────────────────────────────────────────────────────
@@ -418,6 +419,9 @@ function renderHeader() {
 // everything (an open day modal included, so its cards flip too).
 async function setViewAs(mode) {
   state.viewAs = mode;
+  // Drop any "(N)" request count from the tab while previewing — a friend's
+  // view has no such chrome; loadAndRender's poll restores it on exit.
+  if (mode) setTabTitle(0);
   renderHeader();
   await loadAndRender();
   if (mode) toast(`Previewing as ${mode === "anon" ? "a signed-out visitor" : `a ${mode}-tier friend`}.`, "info");
@@ -507,7 +511,14 @@ function indexTrips(trips, gridStart, gridEnd) {
   }
 }
 
+// Every calendar fetch — user-driven load, silent reload, or the friend live
+// poll — shares this generation counter. A fetch applies its result only if
+// it's still the newest one started, so a slow background poll can never
+// overwrite a fresh month-navigation or post-action reload (and vice-versa).
+let calGen = 0;
+
 async function loadAndRender() {
+  const gen = ++calGen;
   const { gridStart, gridEnd } = monthGrid(state.cursor);
   let trips = [];
   try {
@@ -516,11 +527,12 @@ async function loadAndRender() {
     if (e.status === 401) { API.logoutOwner(); return location.reload(); }
     toast(msg(e), "error");
   }
+  if (gen !== calGen) return;   // a newer calendar load/poll superseded this one
   indexTrips(trips, gridStart, gridEnd);
   renderCalendar();
   // Real role, not effViewer(): the badge is owner chrome (and its element is
-  // absent while previewing — refreshPendingBadge no-ops then).
-  if (state.viewer.role === "owner") refreshPendingBadge();
+  // absent while previewing — pollRequests no-ops for non-owners).
+  if (state.viewer.role === "owner") pollRequests();
   if (state.openDay) renderDayModal(state.openDay);
 }
 
@@ -1278,10 +1290,9 @@ async function openFriends() {
 
 // ─── REQUESTS QUEUE (owner) ────────────────────────────────────────────────
 
-async function openRequests() {
-  let reqs = [];
-  try { reqs = await API.listRequests(); } catch (e) { return toast(msg(e), "error"); }
-  const rows = reqs.map(r => `
+function requestRowsHtml(reqs) {
+  if (!reqs.length) return `<div class="muted">No pending requests 🎉</div>`;
+  return reqs.map(r => `
     <div class="req-row" data-rid="${r.id}">
       <div class="req-main">
         <b>${escapeHtml(r.display_name)}</b> wants a seat on
@@ -1293,37 +1304,286 @@ async function openRequests() {
         <button class="mini-btn" data-decline="${r.id}">Decline</button>
       </div>
     </div>`).join("");
-  openModal(`
-    <div class="modal-head"><h2>Seat requests</h2><button class="icon-btn" data-close>✕</button></div>
-    <div class="req-list">${rows || `<div class="muted">No pending requests 🎉</div>`}</div>`, { wide: true });
-  const root = document.getElementById("modal");
+}
+
+// Re-paint the open Requests modal's list in place (used by the live poller so
+// an owner watching the queue sees arrivals/cancellations without reopening).
+// Two guards keep a background poll from disrupting the owner mid-click:
+//   1. a content signature — skip the rebuild entirely when nothing visible
+//      changed (the common case), so buttons aren't needlessly recreated;
+//   2. an interaction latch — if the owner is pressing inside the list, defer
+//      the rebuild until pointer-up, so a poll can't destroy the button node
+//      between mousedown and mouseup (which would silently swallow the click).
+let reqListSig = null;                    // signature of what's currently rendered
+let reqListInteracting = false;           // pointer is down inside #req-list
+let reqListPending = null;                // reqs to render once the interaction ends
+
+function renderRequestList(reqs) {
+  const list = document.getElementById("req-list");
+  if (!list) { reqListSig = null; return; }
+  const sig = reqs.map(r => `${r.id}:${r.free_seats}/${r.car_seats}`).join(",");
+  if (sig === reqListSig) return;
+  if (reqListInteracting) { reqListPending = reqs; return; }
+  reqListSig = sig;
+  reqListPending = null;
+  list.innerHTML = requestRowsHtml(reqs);
+  wireRequestButtons(list);
+}
+
+function endReqInteract() {
+  if (!reqListInteracting) return;
+  reqListInteracting = false;
+  if (reqListPending) { const r = reqListPending; reqListPending = null; renderRequestList(r); }
+}
+
+function wireRequestButtons(root) {
   root.querySelectorAll("[data-approve]").forEach(b => b.onclick = async () => {
-    try { await API.approveRequest(+b.dataset.approve); toast("Approved.", "ok"); refreshPendingBadge(); openRequests(); if (state.cursor) loadCalendarSilently(); }
+    try { await API.approveRequest(+b.dataset.approve); toast("Approved.", "ok"); await pollRequests(); if (state.cursor) loadCalendarSilently(); }
     catch (e) { toast(msg(e), "error"); }
   });
   root.querySelectorAll("[data-decline]").forEach(b => b.onclick = async () => {
-    try { await API.declineRequest(+b.dataset.decline); toast("Declined.", "ok"); refreshPendingBadge(); openRequests(); if (state.cursor) loadCalendarSilently(); }
+    try { await API.declineRequest(+b.dataset.decline); toast("Declined.", "ok"); await pollRequests(); if (state.cursor) loadCalendarSilently(); }
     catch (e) { toast(msg(e), "error"); }
   });
 }
 
+async function openRequests() {
+  let reqs = [];
+  try { reqs = await API.listRequests(); } catch (e) { return toast(msg(e), "error"); }
+  openModal(`
+    <div class="modal-head">
+      <h2>Seat requests</h2>
+      <div class="modal-head-tools">
+        <span class="live-dot" title="Updating live">●</span>
+        <button class="icon-btn" id="req-alerts" hidden title="Get a desktop alert for new requests">🔔</button>
+        <button class="icon-btn" data-close>✕</button>
+      </div>
+    </div>
+    <div class="req-list" id="req-list"></div>`, { wide: true });
+  const list = document.getElementById("req-list");
+  reqListSig = null; reqListInteracting = false; reqListPending = null;
+  list.addEventListener("pointerdown", () => { reqListInteracting = true; });
+  renderRequestList(reqs);          // initial paint (+ wires buttons)
+  setupAlertsButton();
+  // NOTE: seenRequestIds is owned by the poll loop, which keeps it current, so
+  // everything already listed here is "seen". Opening the modal must NOT
+  // re-baseline it — an independent fetch here raced the poller and could
+  // re-announce or swallow a request.
+}
+
+// Optional desktop notifications — strictly opt-in, requested from a real click
+// (never a cold prompt on load). Shown only while permission is "default".
+function setupAlertsButton() {
+  const btn = document.getElementById("req-alerts");
+  if (!btn || typeof Notification === "undefined") return;
+  if (Notification.permission === "default") {
+    btn.hidden = false;
+    btn.onclick = async () => {
+      try { await Notification.requestPermission(); } catch (e) { /* ignore */ }
+      btn.hidden = Notification.permission !== "default";
+      if (Notification.permission === "granted") toast("Desktop alerts on.", "ok");
+    };
+  }
+}
+
 async function loadCalendarSilently() {
+  const gen = ++calGen;
   const { gridStart, gridEnd } = monthGrid(state.cursor);
   try {
     const trips = await API.getCalendar(ymd(gridStart), ymd(gridEnd), state.viewAs);
+    if (gen !== calGen) return;   // superseded by a newer calendar load/poll
     indexTrips(trips, gridStart, gridEnd);
     renderCalendar();
   } catch (e) { /* ignore */ }
 }
 
-async function refreshPendingBadge() {
+// ─── LIVE SEAT REQUESTS (owner) ─────────────────────────────────────────────
+// The backend runs multiple *sync* gunicorn workers with a 30s timeout, so a
+// held-open push channel (SSE / long-poll) would pin a whole worker per open
+// tab and be cut at the timeout anyway. Instead the owner short-polls the
+// (already admin-gated) pending list and reconciles the UI from it: the nav
+// badge, the tab-title count (a signal even when the tab is backgrounded), a
+// toast + optional desktop alert on genuinely new requests, and — if the
+// Requests modal is open — its list in place. Cadence is adaptive (quicker
+// when focused) and self-scheduling.
+//
+// pollRequests() is called both by the timer loop AND directly (loadAndRender,
+// approve/decline). Those can overlap, and two GET /api/admin/requests can
+// resolve out of order across separate sync workers. A monotonic generation
+// token guards against that: each poll captures a gen before its fetch and, on
+// return, applies its result ONLY if it's still the newest poll started — so a
+// stale in-flight response can never clobber the badge/title/seen-set or fire a
+// false "new request" toast. All shared state is thus written by exactly one
+// (the newest) poll at a time.
+
+const BASE_TITLE = "Availability";       // must match index.html <title>
+const REQ_POLL_MS = 12000;               // focused
+const REQ_POLL_HIDDEN_MS = 45000;        // backgrounded — slower, still updates the title
+let reqPollTimer = null;
+let reqPollGen = 0;                      // bumped when a poll starts; only the newest applies
+let seenRequestIds = null;               // Set of ids; null until the first poll sets a baseline
+let lastPendingCount = 0;
+
+async function pollRequests() {
+  if (state.viewer.role !== "owner") return;
+  const gen = ++reqPollGen;
+  let reqs;
   try {
-    const reqs = await API.listRequests();
-    const badge = document.getElementById("pending-badge");
-    if (!badge) return;
-    if (reqs.length) { badge.hidden = false; badge.textContent = reqs.length; }
-    else badge.hidden = true;
-  } catch (e) { /* ignore */ }
+    reqs = await API.listRequests();
+  } catch (e) {
+    // Owner key revoked/rotated mid-session: recover like the calendar path
+    // (loadAndRender) rather than poll a now-forbidden endpoint forever behind
+    // a frozen badge. Other errors are transient — the next tick retries.
+    if (e && e.status === 401) { clearTimeout(reqPollTimer); API.logoutOwner(); location.reload(); }
+    return;
+  }
+  if (gen !== reqPollGen) return;        // a newer poll started — drop this stale response
+
+  // Suppress owner-chrome signals while the owner is previewing as a friend
+  // ("view as"): the badge element is absent then anyway, but the tab title,
+  // toasts, and desktop alerts would otherwise bleed through the preview. The
+  // seen-set is still advanced so exiting preview doesn't dump a backlog toast.
+  const preview = !!state.viewAs;
+  const n = reqs.length;
+
+  const badge = document.getElementById("pending-badge");
+  if (badge) {
+    if (n) { badge.hidden = false; badge.textContent = n; } else badge.hidden = true;
+    if (n > lastPendingCount) pulse(badge);
+  }
+  if (!preview) setTabTitle(n);
+
+  // Genuinely new ids since we last looked → announce. Skipped on the first
+  // poll, which only establishes the baseline of what's already pending.
+  const ids = new Set(reqs.map(r => r.id));
+  if (seenRequestIds === null) {
+    seenRequestIds = ids;
+  } else {
+    const fresh = reqs.filter(r => !seenRequestIds.has(r.id));
+    seenRequestIds = ids;
+    if (fresh.length && !preview) announceRequests(fresh);
+  }
+  lastPendingCount = n;
+
+  renderRequestList(reqs);               // no-ops unless the modal is open
+  return reqs;
+}
+
+function announceRequests(fresh) {
+  const text = fresh.length === 1
+    ? `New seat request from ${fresh[0].display_name}`
+    : `${fresh.length} new seat requests`;
+  toast(text, "info");
+  // Desktop alert only if the owner already granted it AND isn't looking.
+  if (typeof Notification !== "undefined" && Notification.permission === "granted" && document.hidden) {
+    try {
+      const note = new Notification(text, {
+        body: fresh.length === 1 ? `${fresh[0].destination} · ${fmtRange(fresh[0].start_date, fresh[0].end_date)}` : "Open the calendar to review.",
+        tag: "avail-seat-requests",       // collapse repeats into one
+      });
+      note.onclick = () => { window.focus(); note.close(); };
+    } catch (e) { /* some browsers throw off a user gesture; ignore */ }
+  }
+}
+
+function setTabTitle(n) { document.title = n > 0 ? `(${n}) ${BASE_TITLE}` : BASE_TITLE; }
+
+function pulse(el) {
+  el.classList.remove("pulse");
+  void el.offsetWidth;                    // restart the CSS animation
+  el.classList.add("pulse");
+}
+
+// ─── LIVE UPDATES FOR FRIENDS ───────────────────────────────────────────────
+// A friend's live channel is the calendar they already view: its tier
+// projection carries my_status / on_trip / can_request / free_seats, which is
+// exactly what changes when the owner approves, declines, adds, or removes
+// them. So the friend polls the visible month (through the shared calGen guard
+// above) and, on any change, re-renders the grid + an open day modal and
+// toasts the transitions to their own participation. Only the visible month is
+// watched — an approval on a month they aren't looking at surfaces when they
+// navigate there. Basic/full/busy tiers all carry my_status, so even an
+// owner-added busy-tier friend gets notified (destination stays hidden).
+
+// Collapse a projected trip to this viewer's own participation state.
+function myPart(t) {
+  if (t.my_status === "confirmed" || (t.on_trip && t.my_status == null)) return "on";
+  if (t.my_status === "pending") return "pending";
+  if (t.my_status === "declined") return "declined";
+  return "off";
+}
+// Per-trip signature of everything a friend can see change on a card.
+function tripSig(t) {
+  return `${t.my_status || ""}:${t.on_trip ? 1 : 0}:${t.free_seats ?? ""}:${t.confirmed_count ?? ""}:${t.can_request ? 1 : 0}:${t.status}`;
+}
+function calSignature(trips) { return trips.map(t => `${t.id}${tripSig(t)}`).join(","); }
+function openDaySignature() {
+  const dt = state.tripsByDay[state.openDay] || [];
+  return dt.map(t => `${t.id}${tripSig(state.tripsById[t.id])}`).join("|");
+}
+
+function announceMyChanges(prevById, newTrips) {
+  for (const t of newTrips) {
+    const before = prevById[t.id];
+    if (!before) continue;                      // trip newly in view — no transition to report
+    const a = myPart(before), b = myPart(t);
+    if (a === b) continue;
+    const dest = t.destination;                 // hidden at busy tier → generic wording
+    if (b === "on" && a !== "on")
+      toast(dest ? `✓ You're on the ${dest} trip 🎉` : "✓ You've been added to a trip 🎉", "ok");
+    else if (b === "declined" && a === "pending")
+      toast(dest ? `Your seat request for ${dest} wasn't accepted` : "Your seat request wasn't accepted", "info");
+    else if (b === "off" && a === "on")
+      toast(dest ? `You're no longer on the ${dest} trip` : "You're no longer on a trip", "info");
+  }
+}
+
+async function pollFriend() {
+  if (state.viewer.role !== "friend") return;
+  const gen = ++calGen;
+  const { gridStart, gridEnd } = monthGrid(state.cursor);
+  let trips;
+  try { trips = await API.getCalendar(ymd(gridStart), ymd(gridEnd)); }
+  catch (e) { return; }                         // calendar never 401s; transient only
+  if (gen !== calGen) return;                   // navigated away or superseded → drop
+
+  const prev = state.tripsById;
+  const gridChanged = calSignature(trips) !== calSignature(Object.values(prev));
+  const openDaySigBefore = state.openDay ? openDaySignature() : null;
+  indexTrips(trips, gridStart, gridEnd);
+  if (gridChanged) renderCalendar();
+  // Re-render an open day modal only if one of ITS trips changed (avoids
+  // flicker when an unrelated day's seat count shifts).
+  if (state.openDay && openDaySignature() !== openDaySigBefore) renderDayModal(state.openDay);
+  announceMyChanges(prev, trips);
+}
+
+// Self-scheduling loop: schedules the NEXT poll only after the current settles.
+// Interval adapts to tab visibility; a return to the tab triggers an immediate
+// catch-up poll. Overlapping fetches are safe — the generation guards in
+// pollRequests()/the calGen path drop all but the newest response. Runs for
+// owner (requests queue) and friend (own participation); anon has nothing live.
+function startLiveUpdates() {
+  const role = state.viewer.role;
+  if (role !== "owner" && role !== "friend") return;
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) runPoll(); });
+  // Global so it still fires when a click is released off the button; only ends
+  // an interaction the Requests list actually started (see renderRequestList).
+  document.addEventListener("pointerup", endReqInteract);
+  document.addEventListener("pointercancel", endReqInteract);
+  scheduleNextPoll();
+}
+
+function scheduleNextPoll() {
+  clearTimeout(reqPollTimer);
+  reqPollTimer = setTimeout(runPoll, document.hidden ? REQ_POLL_HIDDEN_MS : REQ_POLL_MS);
+}
+
+async function runPoll() {
+  try {
+    if (state.viewer.role === "owner") await pollRequests();
+    else if (state.viewer.role === "friend") await pollFriend();
+  } finally { scheduleNextPoll(); }
 }
 
 // ─── CONFIRM DIALOG ────────────────────────────────────────────────────────
