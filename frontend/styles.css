@@ -183,6 +183,26 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; z-index: 50; overflow-y: auto; }
 .modal { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; width: 100%; max-width: 460px; box-shadow: var(--shadow); }
 .modal.wide { max-width: 620px; }
+/* Resizable trip windows. Until first drag the modal flows as usual; dragging
+   the grip freezes it in place (position: fixed, set inline) and the content
+   scrolls inside. container-type lets the maps take their height from the
+   window itself (cqh) once it's user-sized. */
+.modal.resizable { position: relative; display: flex; flex-direction: column; }
+.modal.resizable .modal-scroll { min-height: 0; }
+.modal.resized { position: fixed; margin: 0; max-width: none; overflow: hidden; container-type: size; }
+.modal.resized .modal-scroll { overflow-y: auto; flex: 1; display: flex; flex-direction: column; }
+/* The inner box (trip card) fills the resized window exactly: the flex chain
+   hands all slack height to the map-bearing card, and inside it to the map —
+   so the bottom gap between card and window edge is constant at any size.
+   Cards without a map keep their natural height. */
+.modal.resized .trip-cards { flex: 1; min-height: 0; }
+.modal.resized .trip-card:has(.tc-map) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.modal.resized .tc-map { flex: 1; height: auto; min-height: 150px; }
+.modal.resized .map-editor { height: 42cqh; min-height: 170px; }
+.modal-grip { position: absolute; right: 0; bottom: 0; width: 22px; height: 22px; cursor: nwse-resize; touch-action: none; z-index: 5; }
+.modal-grip::before { content: ""; position: absolute; right: 5px; bottom: 5px; width: 9px; height: 9px; border-right: 2px solid var(--faint); border-bottom: 2px solid var(--faint); border-bottom-right-radius: 3px; }
+.modal-grip:hover::before { border-color: var(--muted); }
+
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .modal h2 { margin: 0 0 4px; font-size: 19px; }
 .modal-sub { color: var(--muted); font-size: 13.5px; margin: 0 0 16px; }

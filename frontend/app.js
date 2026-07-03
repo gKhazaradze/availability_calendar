@@ -163,6 +163,14 @@ function pinName(p, activities) {
   return p.label || act || "Spot";
 }
 
+// Leaflet doesn't notice its container changing size (modal resize grip,
+// browser window resize) — re-tile whenever it does. The observer dies with
+// the element when the modal is torn down.
+function watchMapSize(el, map) {
+  if (typeof ResizeObserver === "undefined") return;
+  new ResizeObserver(() => map.invalidateSize({ animate: false })).observe(el);
+}
+
 // ─── TOAST ────────────────────────────────────────────────────────────────
 
 let toastTimer = null;
@@ -186,7 +194,59 @@ function openModal(html, opts = {}) {
   back.addEventListener("click", e => { if (e.target === back) closeModal(); });
   back.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", closeModal));
   document.addEventListener("keydown", escClose);
+  if (opts.resizable) makeModalResizable(back.querySelector(".modal"));
   return back;
+}
+
+// Resize grip for a modal (trip windows). Dragging the corner sizes it freely;
+// on the first drag the modal's on-screen box is frozen (position: fixed) so it
+// grows toward the pointer instead of re-centering, and the content scrolls
+// inside. Pointer events → mouse and touch. Double-click the grip to reset.
+// Maps inside follow along via their own ResizeObserver (see buildTripMap).
+function makeModalResizable(modal) {
+  if (!modal) return;
+  // Wrap the content in a scroller so the grip stays pinned to the modal
+  // corner instead of scrolling away with it.
+  const scroller = document.createElement("div");
+  scroller.className = "modal-scroll";
+  while (modal.firstChild) scroller.appendChild(modal.firstChild);
+  modal.appendChild(scroller);
+  const grip = document.createElement("div");
+  grip.className = "modal-grip";
+  grip.title = "Drag to resize · double-click to reset";
+  modal.appendChild(grip);
+  modal.classList.add("resizable");
+
+  grip.addEventListener("dblclick", () => {
+    modal.classList.remove("resized");
+    modal.style.cssText = "";
+  });
+  grip.addEventListener("pointerdown", e => {
+    if (e.button > 0) return;
+    e.preventDefault();
+    const r = modal.getBoundingClientRect();
+    if (!modal.classList.contains("resized")) {
+      modal.classList.add("resized");
+      modal.style.left = r.left + "px";
+      modal.style.top = r.top + "px";
+    }
+    const startX = e.clientX, startY = e.clientY, startW = r.width, startH = r.height;
+    const move = ev => {
+      ev.preventDefault();
+      const w = Math.max(300, Math.min(window.innerWidth - r.left - 8, startW + ev.clientX - startX));
+      const h = Math.max(220, Math.min(window.innerHeight - r.top - 8, startH + ev.clientY - startY));
+      modal.style.width = w + "px";
+      modal.style.height = h + "px";
+    };
+    const up = () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      document.removeEventListener("pointercancel", up);
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+    document.addEventListener("pointercancel", up);
+  });
 }
 function closeModal() {
   document.getElementById("modal")?.remove();
@@ -553,7 +613,7 @@ function renderDayModal(day) {
       <h2>${escapeHtml(heading)}</h2>
       <button class="icon-btn" data-close>✕</button>
     </div>
-    <div class="trip-cards">${cards}</div>`, { wide: effViewer().role === "owner" });
+    <div class="trip-cards">${cards}</div>`, { wide: effViewer().role === "owner", resizable: true });
   back.addEventListener("click", e => { if (e.target === back) state.openDay = null; });
   back.querySelector("[data-close]").addEventListener("click", () => { state.openDay = null; });
   wireTripCards();
@@ -662,8 +722,10 @@ function buildTripMap(el, t) {
   }
   const group = L.featureGroup(layers).addTo(map);
   map.fitBounds(group.getBounds().pad(0.25), { maxZoom: 13 });
-  // The modal was appended this tick; Leaflet needs a size pass once laid out.
+  // The modal was appended this tick; Leaflet needs a size pass once laid out —
+  // and again whenever the container changes (modal resize grip, window resize).
   setTimeout(() => map.invalidateSize(), 0);
+  watchMapSize(el, map);
 
   // Clickable activity bullets → jump to that activity's pin (one pin: center
   // + popup; several: frame them all).
@@ -896,7 +958,7 @@ function openTripForm(trip, prefill = {}) {
     <div class="modal-actions">
       <button class="btn" data-close>Cancel</button>
       <button class="btn btn-primary" id="f-save">${trip ? "Save changes" : "Create trip"}</button>
-    </div>`, { wide: true });
+    </div>`, { wide: true, resizable: true });
 
   // ── Editor state: activities + geo, saved wholesale with the trip. Pins link
   // to activities by INDEX into the acts array; empty act rows are dropped at
@@ -1081,6 +1143,7 @@ function openTripForm(trip, prefill = {}) {
 
     syncArea(); syncPinMarkers(); redrawPins();
     setTimeout(() => fmap.invalidateSize(), 0);
+    watchMapSize(document.getElementById("f-map"), fmap);
   } else {
     redrawPins();
   }
