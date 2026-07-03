@@ -198,11 +198,13 @@ function openModal(html, opts = {}) {
   return back;
 }
 
-// Resize grip for a modal (trip windows). Dragging the corner sizes it freely;
-// on the first drag the modal's on-screen box is frozen (position: fixed) so it
-// grows toward the pointer instead of re-centering, and the content scrolls
-// inside. Pointer events → mouse and touch. Double-click the grip to reset.
-// Maps inside follow along via their own ResizeObserver (see buildTripMap).
+// Resize grip for a modal (trip windows). Dragging the corner sizes it freely.
+// On first drag only the TOP edge is anchored (position: fixed); horizontally
+// the window stays centered (left: 50% + translateX), so width grows evenly
+// toward both screen edges instead of lopsidedly to the right from a frozen
+// left border. Content scrolls inside. Pointer events → mouse and touch.
+// Double-click the grip to reset. Maps inside follow along via their own
+// ResizeObserver (see buildTripMap).
 function makeModalResizable(modal) {
   if (!modal) return;
   // Wrap the content in a scroller so the grip stays pinned to the modal
@@ -227,13 +229,14 @@ function makeModalResizable(modal) {
     const r = modal.getBoundingClientRect();
     if (!modal.classList.contains("resized")) {
       modal.classList.add("resized");
-      modal.style.left = r.left + "px";
-      modal.style.top = r.top + "px";
+      modal.style.top = r.top + "px";   // anchor vertically only; CSS keeps it centered
     }
     const startX = e.clientX, startY = e.clientY, startW = r.width, startH = r.height;
     const move = ev => {
       ev.preventDefault();
-      const w = Math.max(300, Math.min(window.innerWidth - r.left - 8, startW + ev.clientX - startX));
+      // 2× the horizontal delta: the width change splits across both sides of
+      // the centered window, so the grip stays under the pointer.
+      const w = Math.max(300, Math.min(window.innerWidth - 16, startW + 2 * (ev.clientX - startX)));
       const h = Math.max(220, Math.min(window.innerHeight - r.top - 8, startH + ev.clientY - startY));
       modal.style.width = w + "px";
       modal.style.height = h + "px";
