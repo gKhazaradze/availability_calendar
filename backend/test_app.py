@@ -46,7 +46,7 @@ def test_anonymous_calendar_shows_busy_spans_without_detail(client, make_trip):
     assert t["start_date"] == "2026-01-12" and t["end_date"] == "2026-01-14"
     for forbidden in ("destination", "location_label", "car_seats", "free_seats",
                       "participants", "notes", "category", "on_trip", "my_status",
-                      "can_request"):
+                      "can_request", "activities", "area", "pins"):
         assert forbidden not in t, forbidden
     # Nothing sensitive in the raw body either.
     assert b"SecretValley" not in r.data and b"leaving 6am" not in r.data
@@ -94,7 +94,7 @@ def test_busy_tier_sees_only_busy_span(client, make_friend, make_trip):
     trip = _trip_for(client, f["token"], t["id"])
     assert trip["status"] == "busy"
     for forbidden in ("destination", "location_label", "car_seats", "free_seats",
-                      "participants", "notes", "category"):
+                      "participants", "notes", "category", "activities", "area", "pins"):
         assert forbidden not in trip, forbidden
 
 
@@ -209,6 +209,159 @@ def test_error_bodies_never_leak_destination(client, make_friend, make_trip):
     r = client.get("/api/trips/99999", headers=friend_headers(basic["token"]))
     assert r.status_code == 404
     assert r.get_json() == {"error": "not_found"}
+
+
+# ─── Activities, map area & pins (trip extras) ─────────────────────────────
+# activities + area travel with the basic detail block; exact labeled pins are
+# full/owner only. Everything replaces wholesale on save; pins link to
+# activities by index into the submitted (or stored) list.
+
+EXTRAS = {
+    "activities": ["Skiing", "Sauna", "Hot wine"],
+    "area": {"lat": 42.48, "lng": 44.48, "radius_m": 8000},
+    "pins": [
+        {"lat": 42.505, "lng": 44.478, "label": "Lift base", "activity": 0},
+        {"lat": 42.47, "lng": 44.5, "label": "Chalet", "activity": None},
+    ],
+}
+
+
+def test_extras_roundtrip_for_owner(client, make_trip):
+    t = make_trip(**EXTRAS)
+    got = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert got["activities"] == ["Skiing", "Sauna", "Hot wine"]
+    assert got["area"] == {"lat": 42.48, "lng": 44.48, "radius_m": 8000.0}
+    assert got["pins"] == [
+        {"lat": 42.505, "lng": 44.478, "label": "Lift base", "activity": 0},
+        {"lat": 42.47, "lng": 44.5, "label": "Chalet", "activity": None},
+    ]
+
+
+def test_area_without_radius_is_a_plain_pin(client, make_trip):
+    t = make_trip(area={"lat": 41.7, "lng": 44.8})
+    got = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert got["area"] == {"lat": 41.7, "lng": 44.8, "radius_m": None}
+    # radius_m: 0 canonicalizes to the same plain pin
+    client.put(f"/api/admin/trips/{t['id']}",
+               json={"area": {"lat": 41.7, "lng": 44.8, "radius_m": 0}}, headers=ADMIN)
+    got = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert got["area"]["radius_m"] is None
+
+
+def test_basic_sees_activities_and_area_but_not_pins(client, make_friend, make_trip):
+    t = make_trip(**EXTRAS)
+    f = make_friend(tier="basic")
+    trip = _trip_for(client, f["token"], t["id"])
+    assert trip["activities"] == EXTRAS["activities"]
+    assert trip["area"]["lat"] == 42.48
+    assert "pins" not in trip
+
+
+def test_full_sees_pins_linked_to_activities(client, make_friend, make_trip):
+    t = make_trip(**EXTRAS)
+    f = make_friend(tier="full")
+    trip = _trip_for(client, f["token"], t["id"])
+    assert trip["pins"][0]["label"] == "Lift base"
+    assert trip["activities"][trip["pins"][0]["activity"]] == "Skiing"
+    assert trip["pins"][1]["activity"] is None
+
+
+def test_busy_and_anon_never_see_extras(client, make_friend, make_trip):
+    make_trip(**EXTRAS, destination="SecretValley",
+              start_date="2026-01-12", end_date="2026-01-14")
+    f = make_friend(tier="busy")
+    for headers in (friend_headers(f["token"]), None):
+        r = client.get("/api/calendar?from=2026-01-01&to=2026-01-31",
+                       headers=headers or {})
+        t = r.get_json()["trips"][0]
+        for forbidden in ("activities", "area", "pins"):
+            assert forbidden not in t, forbidden
+        # Raw-body sweep: no activity text, pin label, or coordinate leaks.
+        for secret in (b"Skiing", b"Lift base", b"Chalet", b"42.48"):
+            assert secret not in r.data, secret
+
+
+def test_busy_only_privacy_hides_extras_from_full(client, make_friend, make_trip):
+    t = make_trip(**EXTRAS, privacy="busy_only")
+    f = make_friend(tier="full")
+    trip = _trip_for(client, f["token"], t["id"])
+    for forbidden in ("activities", "area", "pins"):
+        assert forbidden not in trip, forbidden
+
+
+def test_extras_kept_on_partial_update_replaced_when_sent(client, make_trip):
+    t = make_trip(**EXTRAS)
+    # PUT without the extras keys → everything kept.
+    client.put(f"/api/admin/trips/{t['id']}", json={"notes": "new plan"}, headers=ADMIN)
+    got = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert got["activities"] == EXTRAS["activities"]
+    assert len(got["pins"]) == 2 and got["area"]["radius_m"] == 8000.0
+    # Sending them replaces wholesale; pin indexes resolve against the NEW list.
+    r = client.put(f"/api/admin/trips/{t['id']}", json={
+        "activities": ["Rafting"],
+        "pins": [{"lat": 1, "lng": 2, "label": "Put-in", "activity": 0}],
+    }, headers=ADMIN)
+    got = r.get_json()["trip"]
+    assert got["activities"] == ["Rafting"]
+    assert got["pins"] == [{"lat": 1.0, "lng": 2.0, "label": "Put-in", "activity": 0}]
+    # Empty lists and a null area clear everything.
+    r = client.put(f"/api/admin/trips/{t['id']}",
+                   json={"activities": [], "pins": [], "area": None}, headers=ADMIN)
+    got = r.get_json()["trip"]
+    assert got["activities"] == [] and got["pins"] == []
+    assert "area" not in got
+
+
+def test_pins_alone_link_against_stored_activities(client, make_trip):
+    t = make_trip(activities=["Skiing", "Sledding"])
+    r = client.put(f"/api/admin/trips/{t['id']}",
+                   json={"pins": [{"lat": 5, "lng": 6, "activity": 1}]}, headers=ADMIN)
+    assert r.status_code == 200
+    assert r.get_json()["trip"]["pins"][0]["activity"] == 1
+    # Index past the stored list → rejected.
+    r = client.put(f"/api/admin/trips/{t['id']}",
+                   json={"pins": [{"lat": 5, "lng": 6, "activity": 2}]}, headers=ADMIN)
+    assert r.status_code == 400 and r.get_json()["error"] == "bad_pin_activity"
+
+
+def test_extras_validation_rejects_garbage(client, make_trip):
+    t = make_trip()
+    bad_bodies = [
+        {"area": {"lat": 91, "lng": 0}},
+        {"area": {"lat": 0, "lng": 181}},
+        {"area": {"lat": 0, "lng": 0, "radius_m": 500_001}},
+        {"area": {"lat": "x", "lng": 0}},
+        {"area": {"lat": True, "lng": 0}},
+        {"area": []},
+        {"activities": "not-a-list"},
+        {"activities": [""]},
+        {"activities": ["x" * 121]},
+        {"activities": ["a"] * 51},
+        {"pins": "nope"},
+        {"pins": ["zap"]},
+        {"pins": [{"lat": 0}]},                                  # missing lng
+        {"pins": [{"lat": 0, "lng": 0, "activity": 0}]},         # trip has no activities
+        {"pins": [{"lat": 0, "lng": 0, "activity": True}]},
+        {"pins": [{"lat": 0, "lng": 0, "activity": -1}]},
+        {"pins": [{"lat": 0, "lng": 0, "label": "y" * 121}]},
+        {"pins": [{"lat": 0, "lng": 0}] * 101},
+    ]
+    for body in bad_bodies:
+        r = client.put(f"/api/admin/trips/{t['id']}", json=body, headers=ADMIN)
+        assert r.status_code == 400, body
+    # Same guard on create: a pin can't link past the submitted activities list.
+    r = client.post("/api/admin/trips", json={
+        "destination": "X", "start_date": "2026-02-01", "end_date": "2026-02-01",
+        "pins": [{"lat": 0, "lng": 0, "activity": 0}],
+    }, headers=ADMIN)
+    assert r.status_code == 400 and r.get_json()["error"] == "bad_pin_activity"
+
+
+def test_delete_trip_cascades_extras(client, make_trip):
+    t = make_trip(**EXTRAS)
+    # Delete succeeds despite activity/pin child rows -> ON DELETE CASCADE.
+    assert client.delete(f"/api/admin/trips/{t['id']}", headers=ADMIN).status_code == 200
+    assert client.get(f"/api/trips/{t['id']}", headers=ADMIN).status_code == 404
 
 
 # ─── Seat requests: state machine ──────────────────────────────────────────

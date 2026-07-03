@@ -18,8 +18,9 @@ Two credential types (the one real departure from the roadtrip template):
     immediately. (Legacy `?u=<token>` invite links still resolve the same token.)
     Tiers:
       busy  → only that a day is unavailable (no destination/seats/people)
-      basic → + destination, dates, free-seat count
-      full  → + participant names, notes, and the ability to request a seat
+      basic → + destination, dates, free-seat count, activity list, map area
+      full  → + participant names, notes, labeled map pins, and the ability
+              to request a seat
   - Anonymous: no credential. May READ the calendar, but every trip collapses to
     a bare busy span (dates only) — the same shape the busy tier sees, so the
     public learns *when* George is away but nothing about the trip. Everything
@@ -74,6 +75,11 @@ MAX_CATEGORY = 40
 MAX_NOTES = 2000
 MAX_SEATS = 50
 MAX_RANGE_DAYS = 366          # cap on a calendar query window
+MAX_ACTIVITY = 120            # one bullet line
+MAX_ACTIVITIES = 50           # bullets per trip
+MAX_PIN_LABEL = 120
+MAX_PINS = 100                # markers per trip
+MAX_AREA_RADIUS_M = 500_000   # 500 km — plenty for "somewhere in this region"
 
 # Friend login (name + birthday) is a low-entropy, often-guessable credential,
 # so the endpoint is throttled per client IP: at most LOGIN_MAX_FAILS failed
@@ -156,6 +162,12 @@ def init_db():
         cols = {r[1] for r in conn.execute("PRAGMA table_info(friends)").fetchall()}
         if "birthday" not in cols:
             conn.execute("ALTER TABLE friends ADD COLUMN birthday TEXT")
+        # Map location columns (an existing DB predates them; fresh ones get
+        # them from schema.sql).
+        trip_cols = {r[1] for r in conn.execute("PRAGMA table_info(trips)").fetchall()}
+        for col in ("area_lat", "area_lng", "area_radius_m"):
+            if col not in trip_cols:
+                conn.execute(f"ALTER TABLE trips ADD COLUMN {col} REAL")
         conn.commit()
         if first_run:
             app.logger.info(f"Initialized new database at {DATABASE_PATH}")
@@ -392,6 +404,12 @@ def parse_trip_payload(body, existing=None):
     if privacy not in ("normal", "busy_only"):
         fail(400, "bad_privacy")
 
+    if has("area") or existing is None:
+        area = parse_area(body.get("area"))
+    else:
+        area = {"area_lat": existing["area_lat"], "area_lng": existing["area_lng"],
+                "area_radius_m": existing["area_radius_m"]}
+
     return {
         "destination": destination,
         "location_label": location_label,
@@ -401,7 +419,123 @@ def parse_trip_payload(body, existing=None):
         "notes": notes,
         "category": category,
         "privacy": privacy,
+        **area,
     }
+
+
+def coord(value, lo, hi, code):
+    """A finite number within [lo, hi], or fail(400). Bools and NaN (which the
+    stdlib JSON parser happily produces) are rejected explicitly."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        fail(400, code)
+    value = float(value)
+    if value != value or not (lo <= value <= hi):   # NaN fails the self-compare
+        fail(400, code)
+    return value
+
+
+def parse_area(value):
+    """Validate the trip's map location: None clears it; otherwise a dict with
+    lat/lng and an optional radius_m > 0 (a plain pin when radius is absent).
+    Returns the three trips-table column values."""
+    if value is None:
+        return {"area_lat": None, "area_lng": None, "area_radius_m": None}
+    if not isinstance(value, dict):
+        fail(400, "bad_area")
+    lat = coord(value.get("lat"), -90, 90, "bad_area")
+    lng = coord(value.get("lng"), -180, 180, "bad_area")
+    radius = value.get("radius_m")
+    if radius is not None:
+        radius = coord(radius, 0, MAX_AREA_RADIUS_M, "bad_area")
+        if radius == 0:
+            radius = None   # 0 = "just a pin"; store the one canonical form
+    return {"area_lat": lat, "area_lng": lng, "area_radius_m": radius}
+
+
+def parse_activities(value):
+    """The trip's bullet list: a list of non-empty strings, deduped by nothing
+    (duplicates are the owner's business), capped in count and length."""
+    if not isinstance(value, list):
+        fail(400, "bad_activities")
+    if len(value) > MAX_ACTIVITIES:
+        fail(400, "too_many_activities")
+    return [clean_str(a, MAX_ACTIVITY) for a in value]
+
+
+def parse_pins(value, n_activities):
+    """Labeled map markers: [{lat, lng, label?, activity?}]. `activity` is an
+    INDEX into the trip's activity list (the one being submitted alongside, or
+    the stored one when only pins are updated) — the client can't know row ids
+    for rows this same request creates."""
+    if not isinstance(value, list):
+        fail(400, "bad_pins")
+    if len(value) > MAX_PINS:
+        fail(400, "too_many_pins")
+    out = []
+    for p in value:
+        if not isinstance(p, dict):
+            fail(400, "bad_pins")
+        idx = p.get("activity")
+        if idx is not None:
+            if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < n_activities):
+                fail(400, "bad_pin_activity")
+        out.append({
+            "lat": coord(p.get("lat"), -90, 90, "bad_pins"),
+            "lng": coord(p.get("lng"), -180, 180, "bad_pins"),
+            "label": clean_str(p.get("label"), MAX_PIN_LABEL, allow_empty=True),
+            "activity": idx,
+        })
+    return out
+
+
+def parse_trip_extras(body, db, trip_id=None):
+    """Pull the replace-all sidecars (activities, pins) out of a trip payload.
+    Returns (activities|None, pins|None) — None meaning "key absent, leave the
+    stored rows alone". Pin activity-indexes are validated against the submitted
+    list, or against the stored one when only pins are sent (update only)."""
+    activities = parse_activities(body["activities"]) if "activities" in body else None
+    pins = None
+    if "pins" in body:
+        if activities is not None:
+            n = len(activities)
+        elif trip_id is not None:
+            n = db.execute(
+                "SELECT COUNT(*) AS n FROM activities WHERE trip_id = ?", (trip_id,)
+            ).fetchone()["n"]
+        else:
+            n = 0   # creating with pins but no activities: only unlinked pins are valid
+        pins = parse_pins(body["pins"], n)
+    return activities, pins
+
+
+def replace_trip_extras(db, trip_id, activities, pins):
+    """Apply the replace-all writes for a trip's sidecar rows, inside the
+    caller's writing() transaction. None = leave that table untouched.
+
+    Order matters: activities first, so pins (whose `activity` index refers to
+    the NEW list) resolve against the rows this same transaction just wrote. If
+    activities are replaced while pins aren't sent, the FK's ON DELETE SET NULL
+    quietly unlinks surviving pins — the API-only edge; the form always sends
+    both lists together."""
+    if activities is not None:
+        db.execute("DELETE FROM activities WHERE trip_id = ?", (trip_id,))
+        for i, name in enumerate(activities):
+            db.execute(
+                "INSERT INTO activities (trip_id, name, position) VALUES (?, ?, ?)",
+                (trip_id, name, i),
+            )
+    if pins is not None:
+        ids = [r["id"] for r in db.execute(
+            "SELECT id FROM activities WHERE trip_id = ? ORDER BY position, id",
+            (trip_id,),
+        ).fetchall()]
+        db.execute("DELETE FROM pins WHERE trip_id = ?", (trip_id,))
+        for p in pins:
+            db.execute(
+                "INSERT INTO pins (trip_id, activity_id, lat, lng, label) VALUES (?, ?, ?, ?, ?)",
+                (trip_id, ids[p["activity"]] if p["activity"] is not None else None,
+                 p["lat"], p["lng"], p["label"]),
+            )
 
 
 # ─── Tier projection (the heart of it) ─────────────────────────────────────
@@ -472,7 +606,31 @@ def project_trip(trip, viewer, db):
         "confirmed_count": confirmed_count,
     })
 
+    # Activities + the trip's rough location ride with the basic detail block —
+    # they say WHAT the trip offers and roughly where, same sensitivity as
+    # destination. Exact labeled pins are detail-tier (full/owner) below.
+    acts = db.execute(
+        "SELECT id, name FROM activities WHERE trip_id = ? ORDER BY position, id",
+        (trip["id"],),
+    ).fetchall()
+    out["activities"] = [a["name"] for a in acts]
+    if trip["area_lat"] is not None and trip["area_lng"] is not None:
+        out["area"] = {"lat": trip["area_lat"], "lng": trip["area_lng"],
+                       "radius_m": trip["area_radius_m"]}
+
     show_names = is_owner or (trip["privacy"] == "normal" and tier == "full")
+    if show_names:
+        # Labeled map pins, with `activity` as an index into out["activities"]
+        # (stable for display and for the owner's form round-trip alike).
+        act_index = {a["id"]: i for i, a in enumerate(acts)}
+        out["pins"] = [
+            {"lat": p["lat"], "lng": p["lng"], "label": p["label"],
+             "activity": act_index.get(p["activity_id"])}
+            for p in db.execute(
+                "SELECT lat, lng, label, activity_id FROM pins "
+                "WHERE trip_id = ? ORDER BY id", (trip["id"],),
+            ).fetchall()
+        ]
     if show_names and not is_owner:
         # Full-tier friend: confirmed NAMES only — never status/source (so a
         # decline of someone else is never exposed).
@@ -728,13 +886,17 @@ def admin_create_trip():
     body = request.get_json(silent=True)
     data = parse_trip_payload(body)
     with writing() as db:
+        activities, pins = parse_trip_extras(body, db)
         cur = db.execute(
             "INSERT INTO trips "
-            "(destination, location_label, start_date, end_date, car_seats, notes, category, privacy, created_at, updated_at) "
-            "VALUES (:destination, :location_label, :start_date, :end_date, :car_seats, :notes, :category, :privacy, datetime('now'), datetime('now'))",
+            "(destination, location_label, start_date, end_date, car_seats, notes, category, privacy, "
+            " area_lat, area_lng, area_radius_m, created_at, updated_at) "
+            "VALUES (:destination, :location_label, :start_date, :end_date, :car_seats, :notes, :category, :privacy, "
+            "        :area_lat, :area_lng, :area_radius_m, datetime('now'), datetime('now'))",
             data,
         )
         trip_id = cur.lastrowid
+        replace_trip_extras(db, trip_id, activities, pins)
     db = get_db()
     trip = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
     return jsonify(trip=project_trip(trip, get_viewer(), db)), 201
@@ -760,9 +922,13 @@ def admin_update_trip(trip_id):
         db.execute(
             "UPDATE trips SET destination=:destination, location_label=:location_label, "
             "start_date=:start_date, end_date=:end_date, car_seats=:car_seats, notes=:notes, "
-            "category=:category, privacy=:privacy, updated_at=datetime('now') WHERE id=:id",
+            "category=:category, privacy=:privacy, "
+            "area_lat=:area_lat, area_lng=:area_lng, area_radius_m=:area_radius_m, "
+            "updated_at=datetime('now') WHERE id=:id",
             data,
         )
+        activities, pins = parse_trip_extras(body, db, trip_id=trip_id)
+        replace_trip_extras(db, trip_id, activities, pins)
     db = get_db()
     trip = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
     return jsonify(trip=project_trip(trip, get_viewer(), db))

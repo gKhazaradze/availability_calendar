@@ -1,14 +1,19 @@
 -- Schema for the availability-calendar backend.
 -- Run automatically on first start if the DB doesn't exist (see init_db()).
 --
--- Three tables:
+-- Tables:
 --   friends       — one per person George shares with; each has a secret token
 --                   and a visibility tier (busy < basic < full).
 --   trips         — a day or multi-day span George is away; carries how many
---                   passenger seats he's offering and an optional privacy flag.
+--                   passenger seats he's offering, an optional privacy flag,
+--                   and an optional map location (a point, or a circle when
+--                   area_radius_m is set).
 --   participants  — unified roster + seat-request table. An owner-added guest is
 --                   confirmed/owner; a friend's seat request is pending/request;
 --                   approve -> confirmed, decline -> declined.
+--   activities    — per-trip bullet list of what's on offer ("skiing", "sauna").
+--   pins          — per-trip labeled map markers, optionally linked to one of
+--                   the trip's activities.
 
 PRAGMA foreign_keys = ON;
 
@@ -38,6 +43,12 @@ CREATE TABLE IF NOT EXISTS trips (
   category       TEXT    NOT NULL DEFAULT 'other',-- 'ski' | 'summer' | 'other' | ...
   privacy        TEXT    NOT NULL DEFAULT 'normal'
                          CHECK (privacy IN ('normal','busy_only')),
+  -- Optional trip location: a dropped pin (lat/lng), widened to a circle when
+  -- area_radius_m is set. All three NULL = no location. (Existing DBs get these
+  -- via ALTERs in init_db(), so keep them nullable with no non-NULL default.)
+  area_lat       REAL,
+  area_lng       REAL,
+  area_radius_m  REAL,
   created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
   updated_at     TEXT    NOT NULL DEFAULT (datetime('now')),
   CHECK (end_date >= start_date),
@@ -68,6 +79,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_participants_active
   WHERE status IN ('pending','confirmed') AND friend_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_participants_trip ON participants (trip_id);
+
+-- ─── Activities (a trip's bullet list of things on offer) ──────────────────
+-- Owned entirely by the trip form: every save replaces the whole list, so rows
+-- carry only their text and position. Deleting a trip cascades.
+CREATE TABLE IF NOT EXISTS activities (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  trip_id  INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+  name     TEXT    NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0             -- order within the trip's list
+);
+CREATE INDEX IF NOT EXISTS idx_activities_trip ON activities (trip_id, position);
+
+-- ─── Pins (labeled map markers on a trip) ──────────────────────────────────
+-- A pin may point at one of the trip's activities (activity_id) — "this is
+-- where the skiing is". Replaced wholesale on trip save, like activities;
+-- ON DELETE SET NULL only matters mid-transaction while a save swaps the
+-- activity rows out from under still-referencing pins.
+CREATE TABLE IF NOT EXISTS pins (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  trip_id     INTEGER NOT NULL REFERENCES trips(id)      ON DELETE CASCADE,
+  activity_id INTEGER          REFERENCES activities(id) ON DELETE SET NULL,
+  lat         REAL    NOT NULL,
+  lng         REAL    NOT NULL,
+  label       TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_pins_trip ON pins (trip_id);
 
 -- ─── Login attempts (rate-limit fuel for /api/login) ───────────────────────
 -- Name+birthday is a guessable credential, so the login endpoint is throttled

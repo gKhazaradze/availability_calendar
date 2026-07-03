@@ -46,6 +46,12 @@ const ERR = {
   bad_date: "Please use valid dates.",
   end_before_start: "End date can't be before the start date.",
   range_too_large: "Date range is too large.",
+  bad_area: "That map location looks invalid.",
+  bad_pins: "One of the map pins looks invalid.",
+  bad_pin_activity: "A pin points at an activity that doesn't exist.",
+  bad_activities: "Activities must be short text lines.",
+  too_many_activities: "Too many activities (max 50).",
+  too_many_pins: "Too many pins (max 100).",
 };
 function msg(e) {
   return (e && (ERR[e.code] || ERR[e.message])) || (e && e.message) || "Something went wrong.";
@@ -132,6 +138,29 @@ function wireDob(container) {
   m.addEventListener("change", sync);
   y.addEventListener("change", sync);
   sync();
+}
+
+// ─── MAPS (Leaflet, loaded from a CDN — every use is guarded so the app
+//     still works fully, minus maps, if it didn't load) ─────────────────────
+
+const DEFAULT_VIEW = { center: [42.1, 43.75], zoom: 7 };   // Georgia, the country
+
+function mapsAvailable() { return typeof L !== "undefined"; }
+
+function makeMap(el, opts = {}) {
+  const map = L.map(el, { scrollWheelZoom: !!opts.scroll });
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  }).addTo(map);
+  return map;
+}
+
+// What a pin should be called in tooltips/popups: its label, else the linked
+// activity's name, else a generic "Spot".
+function pinName(p, activities) {
+  const act = p.activity != null && Array.isArray(activities) ? activities[p.activity] : null;
+  return p.label || act || "Spot";
 }
 
 // ─── TOAST ────────────────────────────────────────────────────────────────
@@ -526,6 +555,23 @@ function renderTripCard(t) {
     actions = friendActions(t);
   }
 
+  // Activities (basic tier +) and the map (area for basic, + labeled pins for
+  // full/owner). The map div is instantiated by wireTripCards() after insert.
+  // An activity with a linked pin renders clickable (jump the map to the pin) —
+  // only when the viewer's projection actually includes pins AND the map will
+  // render, so basic-tier bullets stay plain text.
+  const hasGeo = t.area || (Array.isArray(t.pins) && t.pins.length);
+  const mapBox = hasGeo && mapsAvailable() ? `<div class="tc-map" data-map="${t.id}"></div>` : "";
+  const pinnedActs = new Set(
+    (mapBox && Array.isArray(t.pins) ? t.pins : [])
+      .map(p => p.activity).filter(i => i != null));
+  const activities = Array.isArray(t.activities) && t.activities.length
+    ? `<div class="tc-acts"><span class="tc-acts-head">Activities</span>
+        <ul>${t.activities.map((a, i) => pinnedActs.has(i)
+          ? `<li class="linked" data-act="${i}" title="Show on the map">${escapeHtml(a)}<span class="act-pin">📍</span></li>`
+          : `<li>${escapeHtml(a)}</li>`).join("")}</ul></div>`
+    : "";
+
   return `<div class="trip-card ${t.on_trip ? "mine" : ""}">
     <div class="tc-title"><span class="tc-dot cat-${escapeHtml(t.category || "other")}"></span>${escapeHtml(t.destination)}
       ${t.category && t.category !== "other" ? `<span class="tag">${escapeHtml(t.category)}</span>` : ""}
@@ -533,10 +579,63 @@ function renderTripCard(t) {
     <div class="tc-dates">${escapeHtml(fmtRange(t.start_date, t.end_date))}</div>
     ${t.location_label ? `<div class="tc-loc">📍 ${escapeHtml(t.location_label)}</div>` : ""}
     ${seats}
+    ${activities}
+    ${mapBox}
     ${t.notes ? `<div class="tc-notes">${escapeHtml(t.notes)}</div>` : ""}
     ${people}
     ${actions}
   </div>`;
+}
+
+// Read-only trip map on a card: trip spot (+ area circle) and labeled activity
+// pins with popups. Zoom/pan enabled; scroll-wheel off so the modal scrolls.
+function buildTripMap(el, t) {
+  if (!mapsAvailable()) return;
+  const map = makeMap(el);
+  const layers = [];
+  if (t.area) {
+    layers.push(L.marker([t.area.lat, t.area.lng])
+      .bindPopup(`<b>${escapeHtml(t.destination || "Trip")}</b>`));
+    if (t.area.radius_m) {
+      layers.push(L.circle([t.area.lat, t.area.lng], {
+        radius: t.area.radius_m, weight: 2, color: "#4f8cff", fillOpacity: .12,
+      }));
+    }
+  }
+  const byActivity = new Map();   // activity index -> [marker, ...]
+  for (const p of (t.pins || [])) {
+    const act = p.activity != null && t.activities ? t.activities[p.activity] : null;
+    const popup = `<b>${escapeHtml(pinName(p, t.activities))}</b>`
+      + (act && p.label ? `<br><span class="small">${escapeHtml(act)}</span>` : "");
+    const marker = L.marker([p.lat, p.lng], { opacity: .92 })
+      .bindTooltip(escapeHtml(pinName(p, t.activities)), { direction: "top" })
+      .bindPopup(popup);
+    layers.push(marker);
+    if (p.activity != null) {
+      if (!byActivity.has(p.activity)) byActivity.set(p.activity, []);
+      byActivity.get(p.activity).push(marker);
+    }
+  }
+  const group = L.featureGroup(layers).addTo(map);
+  map.fitBounds(group.getBounds().pad(0.25), { maxZoom: 13 });
+  // The modal was appended this tick; Leaflet needs a size pass once laid out.
+  setTimeout(() => map.invalidateSize(), 0);
+
+  // Clickable activity bullets → jump to that activity's pin (one pin: center
+  // + popup; several: frame them all).
+  el.closest(".trip-card")?.querySelectorAll(".tc-acts li.linked").forEach(li => {
+    li.onclick = () => {
+      const markers = byActivity.get(+li.dataset.act);
+      if (!markers || !markers.length) return;
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      if (markers.length === 1) {
+        map.setView(markers[0].getLatLng(), Math.max(map.getZoom(), 14), { animate: true });
+        markers[0].openPopup();
+      } else {
+        map.fitBounds(L.featureGroup(markers).getBounds().pad(0.3), { maxZoom: 15 });
+      }
+    };
+  });
 }
 
 // The friend-facing action row for a trip — shared by the busy and detail cards.
@@ -610,6 +709,10 @@ function wireTripCards() {
     const tripId = +inp.dataset.addguest;
     const box = root.querySelector(`.guest-suggest[data-suggest="${tripId}"]`);
     setupGuestAutocomplete(inp, box, tripId);
+  });
+  root.querySelectorAll(".tc-map").forEach(el => {
+    const t = state.tripsById[+el.dataset.map];
+    if (t) buildTripMap(el, t);
   });
 }
 
@@ -723,6 +826,27 @@ function openTripForm(trip, prefill = {}) {
         </select></label>
       <label class="field span2"><span>Notes <em>(full-tier only)</em></span>
         <textarea id="f-notes" maxlength="2000" rows="2" placeholder="Leaving 6am, back Sunday night…">${v("notes", "")}</textarea></label>
+      <div class="field span2"><span>Activities <em>(what's on offer — basic tier and up)</em></span>
+        <div id="f-acts" class="act-rows"></div>
+        <button type="button" class="mini-btn" id="f-act-add">＋ Add activity</button>
+      </div>
+      <div class="field span2"><span>Map <em>(trip spot &amp; area for basic+ · labeled pins for full tier)</em></span>
+        ${mapsAvailable() ? `
+        <div class="map-modes">
+          <button type="button" class="mini-btn mode active" id="f-mode-trip">📍 Trip spot</button>
+          <button type="button" class="mini-btn mode" id="f-mode-pin">➕ Activity pins</button>
+          <button type="button" class="mini-btn" id="f-area-clear">Clear spot</button>
+          <span class="small muted" id="f-map-hint">Click the map to drop the trip spot</span>
+        </div>
+        <div id="f-map" class="map-editor"></div>
+        <div class="map-radius" id="f-radius-row" hidden>
+          <span class="small muted">Area radius</span>
+          <input type="range" id="f-radius" min="0" max="50000" step="500" value="0" />
+          <span class="small muted" id="f-radius-val">pin only</span>
+        </div>
+        <div id="f-pins" class="pin-rows"></div>
+        ` : `<div class="muted small">Map unavailable — Leaflet didn't load. Activities still save.</div>`}
+      </div>
     </div>
     <div class="modal-error" id="f-error"></div>
     <div class="modal-actions">
@@ -730,9 +854,189 @@ function openTripForm(trip, prefill = {}) {
       <button class="btn btn-primary" id="f-save">${trip ? "Save changes" : "Create trip"}</button>
     </div>`, { wide: true });
 
+  // ── Editor state: activities + geo, saved wholesale with the trip. Pins link
+  // to activities by INDEX into the acts array; empty act rows are dropped at
+  // save time with the indexes remapped to match.
+  const geo = {
+    acts: (t.activities || []).slice(),
+    area: t.area ? { ...t.area } : null,
+    pins: (t.pins || []).map(p => ({ ...p })),
+  };
+
+  // ── Activities rows ──
+  const actsBox = document.getElementById("f-acts");
+  function actRemove(i) {
+    geo.acts.splice(i, 1);
+    // Keep pin links pointing at the same activity: drop links to the removed
+    // row, shift the ones after it.
+    geo.pins.forEach(p => {
+      if (p.activity == null) return;
+      if (p.activity === i) p.activity = null;
+      else if (p.activity > i) p.activity--;
+    });
+    redrawActs(); redrawPins(); syncPinMarkers();
+  }
+  function redrawActs() {
+    actsBox.innerHTML = geo.acts.map((a, i) => `
+      <div class="act-row">
+        <span class="act-bullet">•</span>
+        <input type="text" data-act="${i}" value="${escapeHtml(a)}" maxlength="120" placeholder="Skiing, sauna, board games…" />
+        <button type="button" class="mini-btn danger" data-act-del="${i}" title="Remove">✕</button>
+      </div>`).join("");
+    actsBox.querySelectorAll("[data-act]").forEach(inp => {
+      inp.oninput = () => { geo.acts[+inp.dataset.act] = inp.value; };
+      // Renames show up in pin dropdowns once the field settles.
+      inp.onchange = () => { redrawPins(); syncPinMarkers(); };
+    });
+    actsBox.querySelectorAll("[data-act-del]").forEach(b => b.onclick = () => actRemove(+b.dataset.actDel));
+  }
+  document.getElementById("f-act-add").onclick = () => {
+    geo.acts.push("");
+    redrawActs();
+    actsBox.querySelector(`[data-act="${geo.acts.length - 1}"]`)?.focus();
+  };
+  redrawActs();
+
+  // ── Map editor ──
+  let fmap = null, tripMarker = null, tripCircle = null, pinMarkers = [];
+  const pinsBox = document.getElementById("f-pins");
+
+  function redrawPins() {
+    if (!pinsBox) return;
+    const options = i => [`<option value="">— no linked activity —</option>`]
+      .concat(geo.acts.map((a, j) =>
+        `<option value="${j}" ${geo.pins[i].activity === j ? "selected" : ""}>${escapeHtml(a.trim() || `(activity ${j + 1})`)}</option>`))
+      .join("");
+    pinsBox.innerHTML = geo.pins.map((p, i) => `
+      <div class="pin-row">
+        <span class="pin-num">${i + 1}</span>
+        <input type="text" data-pin-label="${i}" value="${escapeHtml(p.label || "")}" maxlength="120" placeholder="Label (e.g. lift base, chalet)" />
+        <select data-pin-act="${i}" title="Linked activity">${options(i)}</select>
+        <button type="button" class="mini-btn danger" data-pin-del="${i}" title="Remove pin">✕</button>
+      </div>`).join("");
+    pinsBox.querySelectorAll("[data-pin-label]").forEach(inp => {
+      inp.oninput = () => { geo.pins[+inp.dataset.pinLabel].label = inp.value; };
+      inp.onchange = () => syncPinMarkers();   // tooltip picks up the new label
+    });
+    pinsBox.querySelectorAll("[data-pin-act]").forEach(sel => {
+      sel.onchange = () => {
+        geo.pins[+sel.dataset.pinAct].activity = sel.value === "" ? null : +sel.value;
+        syncPinMarkers();
+      };
+    });
+    pinsBox.querySelectorAll("[data-pin-del]").forEach(b => b.onclick = () => {
+      geo.pins.splice(+b.dataset.pinDel, 1);
+      redrawPins(); syncPinMarkers();
+    });
+  }
+
+  const r6 = x => Math.round(x * 1e6) / 1e6;   // ~0.1 m precision is plenty
+
+  function radiusLabelText() {
+    const m = geo.area && geo.area.radius_m;
+    return !m ? "pin only" : m < 1000 ? `${m} m` : `${(m / 1000).toFixed(m % 1000 ? 1 : 0)} km`;
+  }
+
+  function updateCircle() {
+    if (!fmap) return;
+    if (tripCircle) { fmap.removeLayer(tripCircle); tripCircle = null; }
+    if (geo.area && geo.area.radius_m) {
+      tripCircle = L.circle([geo.area.lat, geo.area.lng], {
+        radius: geo.area.radius_m, weight: 2, color: "#4f8cff", fillOpacity: .1, interactive: false,
+      }).addTo(fmap);
+    }
+    const val = document.getElementById("f-radius-val");
+    if (val) val.textContent = radiusLabelText();
+  }
+
+  function syncArea() {
+    if (!fmap) return;
+    if (tripMarker) { fmap.removeLayer(tripMarker); tripMarker = null; }
+    const row = document.getElementById("f-radius-row");
+    if (row) row.hidden = !geo.area;
+    if (geo.area) {
+      tripMarker = L.marker([geo.area.lat, geo.area.lng], { draggable: true })
+        .bindTooltip("Trip spot", { direction: "top" }).addTo(fmap);
+      tripMarker.on("dragend", () => {
+        const ll = tripMarker.getLatLng();
+        geo.area.lat = r6(ll.lat); geo.area.lng = r6(ll.lng);
+        updateCircle();
+      });
+      const slider = document.getElementById("f-radius");
+      if (slider) slider.value = geo.area.radius_m || 0;
+    }
+    updateCircle();
+  }
+
+  function syncPinMarkers() {
+    if (!fmap) return;
+    pinMarkers.forEach(m => fmap.removeLayer(m));
+    pinMarkers = geo.pins.map((p, i) => {
+      const m = L.marker([p.lat, p.lng], { draggable: true, opacity: .92 })
+        .bindTooltip(`${i + 1} · ${escapeHtml(pinName(p, geo.acts))}`, { direction: "top" })
+        .addTo(fmap);
+      m.on("dragend", () => {
+        const ll = m.getLatLng();
+        p.lat = r6(ll.lat); p.lng = r6(ll.lng);
+      });
+      return m;
+    });
+  }
+
+  if (mapsAvailable() && document.getElementById("f-map")) {
+    fmap = makeMap(document.getElementById("f-map"), { scroll: true });
+    // Start where the trip already is; else show the whole default region.
+    if (geo.area) fmap.setView([geo.area.lat, geo.area.lng], 10);
+    else if (geo.pins.length) fmap.fitBounds(L.latLngBounds(geo.pins.map(p => [p.lat, p.lng])).pad(0.3), { maxZoom: 12 });
+    else fmap.setView(DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
+
+    let mode = "trip";
+    const hint = document.getElementById("f-map-hint");
+    const modeBtns = { trip: document.getElementById("f-mode-trip"), pin: document.getElementById("f-mode-pin") };
+    function setMode(m) {
+      mode = m;
+      modeBtns.trip.classList.toggle("active", m === "trip");
+      modeBtns.pin.classList.toggle("active", m === "pin");
+      if (hint) hint.textContent = m === "trip"
+        ? "Click the map to drop the trip spot"
+        : "Each click adds an activity pin";
+    }
+    modeBtns.trip.onclick = () => setMode("trip");
+    modeBtns.pin.onclick = () => setMode("pin");
+    document.getElementById("f-area-clear").onclick = () => { geo.area = null; syncArea(); };
+    document.getElementById("f-radius").oninput = e => {
+      if (!geo.area) return;
+      geo.area.radius_m = +e.target.value || null;
+      updateCircle();
+    };
+    fmap.on("click", e => {
+      if (mode === "trip") {
+        geo.area = { lat: r6(e.latlng.lat), lng: r6(e.latlng.lng), radius_m: geo.area ? geo.area.radius_m : null };
+        syncArea();
+      } else {
+        geo.pins.push({ lat: r6(e.latlng.lat), lng: r6(e.latlng.lng), label: "", activity: null });
+        redrawPins(); syncPinMarkers();
+        pinsBox.querySelector(`[data-pin-label="${geo.pins.length - 1}"]`)?.focus();
+      }
+    });
+
+    syncArea(); syncPinMarkers(); redrawPins();
+    setTimeout(() => fmap.invalidateSize(), 0);
+  } else {
+    redrawPins();
+  }
+
   document.getElementById("f-save").onclick = async () => {
     const err = document.getElementById("f-error");
     err.textContent = "";
+    // Drop blank activity rows, remapping pin links so they stay on the same
+    // activity (removing a blank row above shifts the indexes below it).
+    const idxMap = new Map();
+    const activities = [];
+    geo.acts.forEach((s, i) => {
+      const val = s.trim();
+      if (val) { idxMap.set(i, activities.length); activities.push(val); }
+    });
     const body = {
       destination: document.getElementById("f-dest").value.trim(),
       location_label: document.getElementById("f-loc").value.trim(),
@@ -742,6 +1046,12 @@ function openTripForm(trip, prefill = {}) {
       category: document.getElementById("f-cat").value,
       privacy: document.getElementById("f-priv").value,
       notes: document.getElementById("f-notes").value.trim(),
+      activities,
+      area: geo.area,
+      pins: geo.pins.map(p => ({
+        lat: p.lat, lng: p.lng, label: (p.label || "").trim(),
+        activity: p.activity != null && idxMap.has(p.activity) ? idxMap.get(p.activity) : null,
+      })),
     };
     if (!body.destination) { err.textContent = "Destination is required."; return; }
     if (!body.start_date || !body.end_date) { err.textContent = "Pick start and end dates."; return; }
@@ -785,8 +1095,8 @@ async function openFriends() {
     <div class="modal-head"><h2>Friends</h2><button class="icon-btn" data-close>✕</button></div>
     <p class="modal-sub">Each friend signs in with their <b>name + birthday</b>, so set both.
       Tier sets how much they see:
-      <b>busy</b> = only “unavailable”, <b>basic</b> = destination + free seats,
-      <b>full</b> = + who's coming, notes, and can request a seat.</p>
+      <b>busy</b> = only “unavailable”, <b>basic</b> = destination, free seats, activities &amp; map area,
+      <b>full</b> = + who's coming, notes, exact map pins, and can request a seat.</p>
     <div class="friend-list">${rows || `<div class="muted">No friends yet.</div>`}</div>
     <div class="friend-add">
       <input id="nf-name" placeholder="New friend's name" maxlength="80" />
