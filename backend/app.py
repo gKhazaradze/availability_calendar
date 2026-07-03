@@ -59,6 +59,10 @@ from flask import (
 # (docker-compose.yml); the fallback is only for local dev.
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "changeme")
 
+# The owner's display name — used when a new trip reserves a seat for the owner
+# (the "I'm going" toggle on trip creation). Env-configurable; defaults to George.
+OWNER_NAME = os.environ.get("OWNER_NAME", "George Khazaradze")
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = BASE_DIR / "avail.db"
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
@@ -655,6 +659,13 @@ def project_trip(trip, viewer, db):
         ).fetchall()
         out["participants"] = [dict(r) for r in roster]
         out["pending_count"] = sum(1 for r in roster if r["status"] == "pending")
+        # Whether the owner currently holds a reserved seat — drives the edit
+        # form's "I'm on this trip" toggle.
+        out["owner_going"] = any(
+            r["friend_id"] is None and r["display_name"] == OWNER_NAME
+            and r["status"] == "confirmed" and r["source"] == "owner"
+            for r in roster
+        )
 
     return out
 
@@ -885,6 +896,17 @@ def admin_create_trip():
     require_admin()
     body = request.get_json(silent=True)
     data = parse_trip_payload(body)
+
+    # "I'm going" toggle (default on): reserve one seat for the owner by seating
+    # them as a confirmed passenger, so friends see the owner in the roster and
+    # one fewer free seat. The owner needs a seat to occupy, so a 0-seat trip is
+    # nudged to 1 (his) — keeping the confirmed<=car_seats invariant intact.
+    owner_going = body.get("owner_going", True) if isinstance(body, dict) else True
+    if not isinstance(owner_going, bool):
+        fail(400, "bad_owner_going")
+    if owner_going and data["car_seats"] < 1:
+        data["car_seats"] = 1
+
     with writing() as db:
         activities, pins = parse_trip_extras(body, db)
         cur = db.execute(
@@ -897,9 +919,28 @@ def admin_create_trip():
         )
         trip_id = cur.lastrowid
         replace_trip_extras(db, trip_id, activities, pins)
+        if owner_going:
+            db.execute(
+                "INSERT INTO participants "
+                "(trip_id, friend_id, display_name, status, source, created_at, decided_at) "
+                "VALUES (?, NULL, ?, 'confirmed', 'owner', datetime('now'), datetime('now'))",
+                (trip_id, OWNER_NAME),
+            )
     db = get_db()
     trip = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
     return jsonify(trip=project_trip(trip, get_viewer(), db)), 201
+
+
+def owner_seat_id(db, trip_id):
+    """Row id of the owner's reserved seat on a trip (a confirmed, owner-added,
+    unlinked participant named OWNER_NAME), or None. This is the row the create
+    toggle inserts and the edit toggle adds/removes."""
+    row = db.execute(
+        "SELECT id FROM participants WHERE trip_id = ? AND friend_id IS NULL "
+        "AND display_name = ? AND status = 'confirmed' AND source = 'owner' LIMIT 1",
+        (trip_id, OWNER_NAME),
+    ).fetchone()
+    return row["id"] if row else None
 
 
 @app.route("/api/admin/trips/<int:trip_id>", methods=["PUT"])
@@ -911,13 +952,29 @@ def admin_update_trip(trip_id):
         if existing is None:
             fail(404, "not_found")
         data = parse_trip_payload(body, existing=existing)
-        # Don't allow shrinking capacity below the people already confirmed.
+
+        # owner-going toggle on edit: add/remove the owner's reserved seat. Absent
+        # → leave the roster alone. A bool that matches the current state is a
+        # no-op; only a real change adds or removes.
+        og = body.get("owner_going") if isinstance(body, dict) else None
+        if og is not None and not isinstance(og, bool):
+            fail(400, "bad_owner_going")
+        seat_id = owner_seat_id(db, trip_id)
+        add_owner = og is True and seat_id is None
+        remove_owner = og is False and seat_id is not None
+        if add_owner and data["car_seats"] < 1:
+            data["car_seats"] = 1               # nudge a 0-seat trip so the owner fits
+
+        # Capacity check against the confirmed count AFTER this toggle's effect,
+        # so removing the owner can free room and adding him can't overbook.
         confirmed = db.execute(
             "SELECT COUNT(*) AS n FROM participants WHERE trip_id = ? AND status = 'confirmed'",
             (trip_id,),
         ).fetchone()["n"]
-        if data["car_seats"] < confirmed:
-            fail(409, "seats_below_confirmed")
+        delta = 1 if add_owner else -1 if remove_owner else 0
+        if data["car_seats"] < confirmed + delta:
+            fail(409, "seat_unavailable" if delta > 0 else "seats_below_confirmed")
+
         data["id"] = trip_id
         db.execute(
             "UPDATE trips SET destination=:destination, location_label=:location_label, "
@@ -927,6 +984,15 @@ def admin_update_trip(trip_id):
             "updated_at=datetime('now') WHERE id=:id",
             data,
         )
+        if add_owner:
+            db.execute(
+                "INSERT INTO participants "
+                "(trip_id, friend_id, display_name, status, source, created_at, decided_at) "
+                "VALUES (?, NULL, ?, 'confirmed', 'owner', datetime('now'), datetime('now'))",
+                (trip_id, OWNER_NAME),
+            )
+        elif remove_owner:
+            db.execute("DELETE FROM participants WHERE id = ?", (seat_id,))
         activities, pins = parse_trip_extras(body, db, trip_id=trip_id)
         replace_trip_extras(db, trip_id, activities, pins)
     db = get_db()

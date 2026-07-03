@@ -52,6 +52,7 @@ const ERR = {
   bad_activities: "Activities must be short text lines.",
   too_many_activities: "Too many activities (max 50).",
   too_many_pins: "Too many pins (max 100).",
+  bad_owner_going: "Invalid value for the reserve-a-seat toggle.",
 };
 function msg(e) {
   return (e && (ERR[e.code] || ERR[e.message])) || (e && e.message) || "Something went wrong.";
@@ -255,7 +256,10 @@ function closeModal() {
   document.getElementById("modal")?.remove();
   document.removeEventListener("keydown", escClose);
 }
-function escClose(e) { if (e.key === "Escape") closeModal(); }
+// Esc closes the topmost modal. Clear openDay too, else a live poll would treat
+// the day modal as still open and re-spawn it (the backdrop/✕ paths already do
+// this; Esc was the gap). Harmless when no day modal is open (already null).
+function escClose(e) { if (e.key === "Escape") { state.openDay = null; closeModal(); } }
 
 // ─── DRAG-SORT (pointer events — mouse and touch alike) ───────────────────
 // Rows drag by their .drag-handle: DOM order follows the pointer live, and
@@ -528,8 +532,14 @@ async function loadAndRender() {
     toast(msg(e), "error");
   }
   if (gen !== calGen) return;   // a newer calendar load/poll superseded this one
+  const prev = state.tripsById;
   indexTrips(trips, gridStart, gridEnd);
   renderCalendar();
+  // A friend-facing reload that wins the calGen race would otherwise swallow a
+  // participation change the poll never gets to announce, so announce it here
+  // too — skipRemoval, since a self-initiated Leave already toasts its own
+  // confirmation (the background poll still announces owner-initiated removals).
+  if (state.viewer.role === "friend") announceMyChanges(prev, trips, { skipRemoval: true });
   // Real role, not effViewer(): the badge is owner chrome (and its element is
   // absent while previewing — pollRequests no-ops for non-owners).
   if (state.viewer.role === "owner") pollRequests();
@@ -621,17 +631,57 @@ function onCellClick(day) {
 function renderDayModal(day) {
   const trips = (state.tripsByDay[day] || []).map(t => state.tripsById[t.id]);
   if (!trips.length) { state.openDay = null; closeModal(); return; }
-  const heading = parseYmd(day).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
-  const cards = trips.map(renderTripCard).join("");
-  const back = openModal(`
-    <div class="modal-head">
-      <h2>${escapeHtml(heading)}</h2>
-      <button class="icon-btn" data-close>✕</button>
-    </div>
-    <div class="trip-cards">${cards}</div>`, { wide: effViewer().role === "owner", resizable: true });
-  back.addEventListener("click", e => { if (e.target === back) state.openDay = null; });
-  back.querySelector("[data-close]").addEventListener("click", () => { state.openDay = null; });
-  wireTripCards();
+  // Refresh IN PLACE when this day's modal is already open (a live poll or a
+  // post-action reload), so the modal's resize/scroll — and unchanged cards'
+  // live maps — survive. Only a genuine fresh open builds the shell.
+  let container = document.querySelector("#modal .trip-cards");
+  if (!(container && state.openDay === day)) {
+    const heading = parseYmd(day).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+    const back = openModal(`
+      <div class="modal-head">
+        <h2>${escapeHtml(heading)}</h2>
+        <button class="icon-btn" data-close>✕</button>
+      </div>
+      <div class="trip-cards"></div>`, { wide: effViewer().role === "owner", resizable: true });
+    back.addEventListener("click", e => { if (e.target === back) state.openDay = null; });
+    back.querySelector("[data-close]").addEventListener("click", () => { state.openDay = null; });
+    container = back.querySelector(".trip-cards");
+  }
+  reconcileTripCards(container, trips);
+}
+
+// Cheap non-crypto hash → a per-card signature so a re-render replaces only the
+// cards whose projected data changed, leaving unchanged cards (and their live
+// Leaflet maps, zoom, open popups) untouched.
+function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h.toString(36); }
+
+function reconcileTripCards(container, trips) {
+  const existing = new Map([...container.children].map(el => [el.dataset.card, el]));
+  const wantIds = new Set(trips.map(t => String(t.id)));
+  for (const [id, el] of existing) if (!wantIds.has(id)) el.remove();   // drop gone cards
+  // Walk the desired order, touching the DOM ONLY for cards that changed or moved
+  // — an unchanged, correctly-placed card (and its live map) is never detached.
+  let anchor = null;                     // the node the next card must follow
+  for (const t of trips) {
+    const id = String(t.id);
+    const sig = hashStr(JSON.stringify(t));
+    let node = existing.get(id);
+    if (!(node && node.dataset.sig === sig)) {          // new or changed → (re)build
+      const tmp = document.createElement("div");
+      tmp.innerHTML = renderTripCard(t);
+      const fresh = tmp.firstElementChild;
+      fresh.dataset.card = id;
+      fresh.dataset.sig = sig;
+      if (node) node.replaceWith(fresh);
+      else if (anchor) anchor.after(fresh);
+      else container.prepend(fresh);
+      node = fresh;
+    }
+    const expected = anchor ? anchor.nextElementSibling : container.firstElementChild;
+    if (node !== expected) { anchor ? anchor.after(node) : container.prepend(node); }
+    anchor = node;
+  }
+  wireTripCards();                       // buildTripMap is idempotent, so reused maps are left alone
 }
 
 function seatPips(free, total) {
@@ -710,7 +760,9 @@ function renderTripCard(t) {
 // pins with popups. Zoom/pan enabled; scroll-wheel off so the modal scrolls.
 function buildTripMap(el, t) {
   if (!mapsAvailable()) return;
+  if (el._avMap) return;          // already initialised (reused card) — keep its live map/zoom
   const map = makeMap(el);
+  el._avMap = map;
   const layers = [];
   if (t.area) {
     layers.push(L.marker([t.area.lat, t.area.lng])
@@ -940,6 +992,10 @@ function openTripForm(trip, prefill = {}) {
         <input id="f-seats" type="number" min="0" max="50" value="${v("car_seats", "0")}" /></label>
       <label class="field"><span>Category</span>
         <select id="f-cat">${cats.map(c => `<option value="${c}" ${(t.category || "other") === c ? "selected" : ""}>${c}</option>`).join("")}</select></label>
+      <label class="field span2 owner-going">
+        <span><input type="checkbox" id="f-owner-going" ${(!trip || t.owner_going) ? "checked" : ""} /> ${trip ? "I'm on this trip (reserve my seat)" : "I'm going — reserve a seat for me"}</span>
+        <em>${trip ? "Adds or removes you from the roster; one seat is yours." : "One seat is marked as taken by you; friends can request the rest."}</em>
+      </label>
       <label class="field span2"><span>Privacy</span>
         <select id="f-priv">
           <option value="normal" ${t.privacy !== "busy_only" ? "selected" : ""}>Normal — friends see per their tier</option>
@@ -1193,6 +1249,10 @@ function openTripForm(trip, prefill = {}) {
     if (!body.destination) { err.textContent = "Destination is required."; return; }
     if (!body.start_date || !body.end_date) { err.textContent = "Pick start and end dates."; return; }
     if (body.end_date < body.start_date) { err.textContent = ERR.end_before_start; return; }
+    // Reserve-a-seat toggle: on create it defaults on; on edit it reflects and
+    // controls whether the owner holds a seat (add/remove themselves).
+    const ownerGoing = document.getElementById("f-owner-going");
+    if (ownerGoing) body.owner_going = ownerGoing.checked;
     try {
       if (trip) await API.updateTrip(trip.id, body);
       else await API.createTrip(body);
@@ -1306,34 +1366,42 @@ function requestRowsHtml(reqs) {
     </div>`).join("");
 }
 
+// A pointer press inside any open modal latches this; poll-driven re-renders of
+// modal contents defer until release so a rebuild can't yank a button out from
+// under the click (which would silently drop it). Only one modal is open at a
+// time, so a single pending re-render (last wins) covers both the owner's
+// Requests list and a friend's day modal.
+let modalPressed = false;
+let pendingModalRender = null;
+let reqListSig = null;                     // last-rendered requests-list signature
+
+function runOrDeferModalRender(fn) {
+  if (modalPressed) pendingModalRender = fn;
+  else fn();
+}
+function releaseModalPress() {
+  modalPressed = false;
+  const fn = pendingModalRender; pendingModalRender = null;
+  if (fn) fn();
+}
+
 // Re-paint the open Requests modal's list in place (used by the live poller so
 // an owner watching the queue sees arrivals/cancellations without reopening).
-// Two guards keep a background poll from disrupting the owner mid-click:
-//   1. a content signature — skip the rebuild entirely when nothing visible
-//      changed (the common case), so buttons aren't needlessly recreated;
-//   2. an interaction latch — if the owner is pressing inside the list, defer
-//      the rebuild until pointer-up, so a poll can't destroy the button node
-//      between mousedown and mouseup (which would silently swallow the click).
-let reqListSig = null;                    // signature of what's currently rendered
-let reqListInteracting = false;           // pointer is down inside #req-list
-let reqListPending = null;                // reqs to render once the interaction ends
-
+// A content signature skips the rebuild when nothing visible changed; the
+// modal-press latch defers it until pointer-up so a poll can't destroy a button
+// mid-click.
 function renderRequestList(reqs) {
   const list = document.getElementById("req-list");
   if (!list) { reqListSig = null; return; }
   const sig = reqs.map(r => `${r.id}:${r.free_seats}/${r.car_seats}`).join(",");
   if (sig === reqListSig) return;
-  if (reqListInteracting) { reqListPending = reqs; return; }
-  reqListSig = sig;
-  reqListPending = null;
-  list.innerHTML = requestRowsHtml(reqs);
-  wireRequestButtons(list);
-}
-
-function endReqInteract() {
-  if (!reqListInteracting) return;
-  reqListInteracting = false;
-  if (reqListPending) { const r = reqListPending; reqListPending = null; renderRequestList(r); }
+  runOrDeferModalRender(() => {
+    const l = document.getElementById("req-list");
+    if (!l) return;
+    reqListSig = sig;
+    l.innerHTML = requestRowsHtml(reqs);
+    wireRequestButtons(l);
+  });
 }
 
 function wireRequestButtons(root) {
@@ -1360,9 +1428,8 @@ async function openRequests() {
       </div>
     </div>
     <div class="req-list" id="req-list"></div>`, { wide: true });
-  const list = document.getElementById("req-list");
-  reqListSig = null; reqListInteracting = false; reqListPending = null;
-  list.addEventListener("pointerdown", () => { reqListInteracting = true; });
+  reqListSig = null;                // force the first paint (the general modal-press
+                                    // latch handles mid-click deferral)
   renderRequestList(reqs);          // initial paint (+ wires buttons)
   setupAlertsButton();
   // NOTE: seenRequestIds is owned by the poll loop, which keeps it current, so
@@ -1522,7 +1589,16 @@ function openDaySignature() {
   return dt.map(t => `${t.id}${tripSig(state.tripsById[t.id])}`).join("|");
 }
 
-function announceMyChanges(prevById, newTrips) {
+// Toast the friend about changes to THEIR OWN participation between two
+// calendar snapshots. skipRemoval omits the on→off ("removed") message: it's
+// the only announced transition the friend can self-cause (by tapping Leave),
+// and their own action already shows its confirmation toast — so reloads driven
+// by the friend's own actions pass skipRemoval to avoid a duplicate, while the
+// background poll announces removals fully (owner-initiated). Multiple changes
+// in one snapshot collapse to a single summary toast (a shared #toast element
+// can only show one at a time).
+function announceMyChanges(prevById, newTrips, { skipRemoval = false } = {}) {
+  const msgs = [];
   for (const t of newTrips) {
     const before = prevById[t.id];
     if (!before) continue;                      // trip newly in view — no transition to report
@@ -1530,12 +1606,14 @@ function announceMyChanges(prevById, newTrips) {
     if (a === b) continue;
     const dest = t.destination;                 // hidden at busy tier → generic wording
     if (b === "on" && a !== "on")
-      toast(dest ? `✓ You're on the ${dest} trip 🎉` : "✓ You've been added to a trip 🎉", "ok");
+      msgs.push({ text: dest ? `✓ You're on the ${dest} trip 🎉` : "✓ You've been added to a trip 🎉", kind: "ok" });
     else if (b === "declined" && a === "pending")
-      toast(dest ? `Your seat request for ${dest} wasn't accepted` : "Your seat request wasn't accepted", "info");
-    else if (b === "off" && a === "on")
-      toast(dest ? `You're no longer on the ${dest} trip` : "You're no longer on a trip", "info");
+      msgs.push({ text: dest ? `Your seat request for ${dest} wasn't accepted` : "Your seat request wasn't accepted", kind: "info" });
+    else if (b === "off" && a === "on" && !skipRemoval)
+      msgs.push({ text: dest ? `You're no longer on the ${dest} trip` : "You're no longer on a trip", kind: "info" });
   }
+  if (msgs.length === 1) toast(msgs[0].text, msgs[0].kind);
+  else if (msgs.length > 1) toast(`${msgs.length} of your trips were updated`, "info");
 }
 
 async function pollFriend() {
@@ -1547,14 +1625,28 @@ async function pollFriend() {
   catch (e) { return; }                         // calendar never 401s; transient only
   if (gen !== calGen) return;                   // navigated away or superseded → drop
 
+  // Session died mid-poll: the owner disabled/removed this friend, so the token
+  // no longer resolves as a friend and the calendar comes back anon-projected
+  // (a friend projection ALWAYS carries a my_status key; anon never does). Don't
+  // misread the vanished participation as per-trip removals — forget the dead
+  // token and reload into the proper signed-out view (which also stops polling).
+  if (trips.length && trips.every(t => !("my_status" in t))) {
+    API.forgetUser();
+    return location.reload();
+  }
+
   const prev = state.tripsById;
   const gridChanged = calSignature(trips) !== calSignature(Object.values(prev));
   const openDaySigBefore = state.openDay ? openDaySignature() : null;
   indexTrips(trips, gridStart, gridEnd);
   if (gridChanged) renderCalendar();
-  // Re-render an open day modal only if one of ITS trips changed (avoids
-  // flicker when an unrelated day's seat count shifts).
-  if (state.openDay && openDaySignature() !== openDaySigBefore) renderDayModal(state.openDay);
+  // Re-render an open day modal only if one of ITS trips changed (avoids flicker
+  // when an unrelated day's seat count shifts), and defer past an in-progress
+  // press so a rebuild can't drop the friend's Request/Leave click.
+  if (state.openDay && openDaySignature() !== openDaySigBefore) {
+    const day = state.openDay;
+    runOrDeferModalRender(() => { if (state.openDay === day) renderDayModal(day); });
+  }
   announceMyChanges(prev, trips);
 }
 
@@ -1567,10 +1659,13 @@ function startLiveUpdates() {
   const role = state.viewer.role;
   if (role !== "owner" && role !== "friend") return;
   document.addEventListener("visibilitychange", () => { if (!document.hidden) runPoll(); });
-  // Global so it still fires when a click is released off the button; only ends
-  // an interaction the Requests list actually started (see renderRequestList).
-  document.addEventListener("pointerup", endReqInteract);
-  document.addEventListener("pointercancel", endReqInteract);
+  // Modal-press latch: while a pointer is held inside an open modal, a live
+  // re-render defers until release (see runOrDeferModalRender) so it can't tear
+  // a button out from under the click. Global listeners so release is caught
+  // even when the pointer wanders off the button first.
+  document.addEventListener("pointerdown", e => { if (e.target.closest(".modal")) modalPressed = true; });
+  document.addEventListener("pointerup", releaseModalPress);
+  document.addEventListener("pointercancel", releaseModalPress);
   scheduleNextPoll();
 }
 

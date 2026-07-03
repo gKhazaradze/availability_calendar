@@ -240,6 +240,9 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .dob .dob-y { flex: 4 1 0; min-width: 0; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .form-grid .span2 { grid-column: 1 / -1; }
+/* "I'm going — reserve a seat for me" toggle on trip creation */
+.owner-going span { display: inline-flex; align-items: center; gap: 8px; color: var(--text); }
+.owner-going input { width: auto; margin: 0; }
 
 /* ─── Trip cards (detail modal) ─── */
 .trip-cards { display: flex; flex-direction: column; gap: 12px; }

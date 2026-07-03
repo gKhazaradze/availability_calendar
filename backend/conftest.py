@@ -67,6 +67,10 @@ def make_trip(client):
             "end_date": "2026-01-12",
             "car_seats": 2,
             "category": "ski",
+            # Default off so seat/roster assertions across the suite stay about the
+            # trip under test; the owner-going toggle is exercised explicitly in
+            # its own tests (and via make_trip(owner_going=True)).
+            "owner_going": False,
         }
         body.update(overrides)
         r = client.post("/api/admin/trips", json=body, headers=ADMIN)

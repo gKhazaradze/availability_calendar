@@ -548,6 +548,171 @@ def test_delete_trip_cascades_participants(client, make_trip):
     assert client.get(f"/api/trips/{t['id']}", headers=ADMIN).status_code == 404
 
 
+# ─── Owner-going toggle ("reserve a seat for me" on trip creation) ─────────
+# owner_going defaults True: the owner is seated as a confirmed passenger on the
+# new trip, taking one seat. Full tier sees the owner in the roster; every tier
+# sees one fewer free seat.
+
+import app as app_module
+
+
+def _create(client, **body):
+    b = {"destination": "Gudauri", "start_date": "2026-01-12", "end_date": "2026-01-12", "car_seats": 3}
+    b.update(body)
+    r = client.post("/api/admin/trips", json=b, headers=ADMIN)
+    assert r.status_code == 201, r.get_json()
+    return r.get_json()["trip"]
+
+
+def test_owner_going_defaults_on_and_seats_owner(client):
+    # Omitting the flag → owner is seated (default on).
+    t = _create(client, car_seats=3)
+    assert t["confirmed_count"] == 1
+    assert t["free_seats"] == 2
+    names = [p["display_name"] for p in t["participants"]]
+    assert names == [app_module.OWNER_NAME]
+
+
+def test_owner_going_off_leaves_trip_empty(client):
+    t = _create(client, car_seats=3, owner_going=False)
+    assert t["confirmed_count"] == 0
+    assert t["free_seats"] == 3
+    assert t["participants"] == []
+
+
+def test_owner_going_visible_to_full_friend_not_basic(client, make_friend):
+    t = _create(client, car_seats=3, owner_going=True)
+    full = make_friend(name="F", tier="full")
+    basic = make_friend(name="B", tier="basic")
+    ft = client.get(f"/api/trips/{t['id']}", headers=friend_headers(full["token"])).get_json()["trip"]
+    bt = client.get(f"/api/trips/{t['id']}", headers=friend_headers(basic["token"])).get_json()["trip"]
+    assert ft["participants"] == [{"name": app_module.OWNER_NAME}]   # full sees the owner by name
+    assert ft["free_seats"] == 2
+    assert "participants" not in bt and bt["free_seats"] == 2         # basic: seat count only
+
+
+def test_owner_going_bumps_zero_seat_trip_to_one(client):
+    # A 0-seat trip with the owner going gets his one seat; friends see 0 free.
+    t = _create(client, car_seats=0, owner_going=True)
+    assert t["car_seats"] == 1 and t["confirmed_count"] == 1 and t["free_seats"] == 0
+
+
+def test_owner_going_off_keeps_zero_seats(client):
+    t = _create(client, car_seats=0, owner_going=False)
+    assert t["car_seats"] == 0 and t["participants"] == []
+
+
+def test_owner_going_leaves_room_for_a_friend_request(client, make_friend):
+    # Owner takes seat 1 of 2; a full friend can still request the remaining one.
+    t = _create(client, car_seats=2, owner_going=True)
+    f = make_friend(tier="full")
+    r = client.post(f"/api/trips/{t['id']}/request-seat", headers=friend_headers(f["token"]))
+    assert r.status_code == 201
+    rid = client.get("/api/admin/requests", headers=ADMIN).get_json()["requests"][0]["id"]
+    assert client.post(f"/api/admin/requests/{rid}/approve", headers=ADMIN).status_code == 200
+    trip = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert trip["free_seats"] == 0 and trip["confirmed_count"] == 2   # owner + friend
+
+
+def test_owner_going_rejects_non_bool(client):
+    r = client.post("/api/admin/trips", json={
+        "destination": "X", "start_date": "2026-01-12", "end_date": "2026-01-12",
+        "car_seats": 2, "owner_going": "yes",
+    }, headers=ADMIN)
+    assert r.status_code == 400 and r.get_json()["error"] == "bad_owner_going"
+
+
+def test_owner_seat_is_removable_by_owner(client):
+    # The reserved seat is an ordinary confirmed participant the owner can drop.
+    t = _create(client, car_seats=2, owner_going=True)
+    pid = t["participants"][0]["id"]
+    assert client.delete(f"/api/admin/participants/{pid}", headers=ADMIN).status_code == 200
+    trip = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert trip["confirmed_count"] == 0 and trip["free_seats"] == 2
+
+
+def _owner_names(trip):
+    return [p["display_name"] for p in trip["participants"] if p["status"] == "confirmed"]
+
+
+def test_edit_toggle_on_adds_owner_seat(client, make_trip):
+    t = make_trip(car_seats=3)                       # made with owner_going=False
+    assert client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]["owner_going"] is False
+    r = client.put(f"/api/admin/trips/{t['id']}", json={"owner_going": True}, headers=ADMIN)
+    trip = r.get_json()["trip"]
+    assert trip["owner_going"] is True
+    assert app_module.OWNER_NAME in _owner_names(trip)
+    assert trip["confirmed_count"] == 1 and trip["free_seats"] == 2
+
+
+def test_edit_toggle_off_removes_owner_seat(client):
+    t = _create(client, car_seats=3, owner_going=True)   # owner seated
+    assert t["owner_going"] is True
+    r = client.put(f"/api/admin/trips/{t['id']}", json={"owner_going": False}, headers=ADMIN)
+    trip = r.get_json()["trip"]
+    assert trip["owner_going"] is False
+    assert app_module.OWNER_NAME not in _owner_names(trip)
+    assert trip["confirmed_count"] == 0 and trip["free_seats"] == 3
+
+
+def test_edit_owner_going_absent_leaves_roster_untouched(client):
+    t = _create(client, car_seats=3, owner_going=True)
+    # A PUT that doesn't mention owner_going must not drop the owner's seat.
+    r = client.put(f"/api/admin/trips/{t['id']}", json={"notes": "changed"}, headers=ADMIN)
+    trip = r.get_json()["trip"]
+    assert trip["owner_going"] is True and trip["confirmed_count"] == 1
+
+
+def test_edit_toggle_on_is_idempotent(client):
+    t = _create(client, car_seats=3, owner_going=True)
+    r = client.put(f"/api/admin/trips/{t['id']}", json={"owner_going": True}, headers=ADMIN)
+    trip = r.get_json()["trip"]
+    assert _owner_names(trip).count(app_module.OWNER_NAME) == 1   # no duplicate seat
+
+
+def test_edit_toggle_on_over_capacity_rejected(client, make_friend):
+    # Fill the only seat with a friend, then the owner can't also take one.
+    t = make_trip_full(client, car_seats=1)
+    f = make_friend(tier="full")
+    client.post(f"/api/admin/trips/{t['id']}/participants", json={"friend_id": f["id"]}, headers=ADMIN)
+    r = client.put(f"/api/admin/trips/{t['id']}", json={"owner_going": True}, headers=ADMIN)
+    assert r.status_code == 409 and r.get_json()["error"] == "seat_unavailable"
+
+
+def test_edit_toggle_off_frees_room_to_shrink_seats(client, make_friend):
+    # Owner + 1 friend on a 2-seat trip; dropping the owner AND shrinking to 1 is OK.
+    t = _create(client, car_seats=2, owner_going=True)
+    f = make_friend(tier="full")
+    client.post(f"/api/admin/trips/{t['id']}/participants", json={"friend_id": f["id"]}, headers=ADMIN)
+    r = client.put(f"/api/admin/trips/{t['id']}", json={"car_seats": 1, "owner_going": False}, headers=ADMIN)
+    assert r.status_code == 200
+    trip = r.get_json()["trip"]
+    assert trip["car_seats"] == 1 and trip["confirmed_count"] == 1
+    assert app_module.OWNER_NAME not in _owner_names(trip)
+
+
+def test_edit_toggle_on_zero_seat_bumps_to_one(client, make_trip):
+    t = make_trip(car_seats=0)
+    r = client.put(f"/api/admin/trips/{t['id']}", json={"owner_going": True}, headers=ADMIN)
+    trip = r.get_json()["trip"]
+    assert trip["car_seats"] == 1 and trip["confirmed_count"] == 1 and trip["free_seats"] == 0
+
+
+def test_edit_owner_going_rejects_non_bool(client, make_trip):
+    t = make_trip(car_seats=2)
+    r = client.put(f"/api/admin/trips/{t['id']}", json={"owner_going": "sure"}, headers=ADMIN)
+    assert r.status_code == 400 and r.get_json()["error"] == "bad_owner_going"
+
+
+def make_trip_full(client, **body):
+    """A trip created with no owner seat (owner_going off), for capacity tests."""
+    b = {"destination": "X", "start_date": "2026-01-12", "end_date": "2026-01-12", "owner_going": False}
+    b.update(body)
+    r = client.post("/api/admin/trips", json=b, headers=ADMIN)
+    assert r.status_code == 201, r.get_json()
+    return r.get_json()["trip"]
+
+
 # ─── Dates / calendar overlap ──────────────────────────────────────────────
 
 def test_create_rejects_bad_dates(client):
