@@ -68,6 +68,58 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// ─── BIRTHDAY PICKER (day-first, consistent on every device) ────────────────
+// A native <input type="date"> orders its fields (day vs. month first) by the
+// phone's region setting, with no way to override it from code — so birthdays use
+// three explicit selects, Day · Month · Year with the month spelled out. That
+// renders identically everywhere and removes all DD/MM ambiguity. dobPickerHTML()
+// builds one from a 'YYYY-MM-DD' value; readDob() reads it back (or "" if blank).
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+                     "July", "August", "September", "October", "November", "December"];
+const DOB_MIN_YEAR = 1920;
+
+function dobPickerHTML(value, { id = "", cls = "" } = {}) {
+  const [, yy = "", mm = "", dd = ""] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "") || [];
+  const sel = (v, cur) => (v === cur ? " selected" : "");
+  let days = `<option value="">Day</option>`;
+  for (let d = 1; d <= 31; d++) { const v = String(d).padStart(2, "0"); days += `<option value="${v}"${sel(v, dd)}>${d}</option>`; }
+  let months = `<option value="">Month</option>`;
+  MONTH_NAMES.forEach((name, i) => { const v = String(i + 1).padStart(2, "0"); months += `<option value="${v}"${sel(v, mm)}>${name}</option>`; });
+  let years = `<option value="">Year</option>`;
+  for (let y = new Date().getFullYear(); y >= DOB_MIN_YEAR; y--) years += `<option value="${y}"${sel(String(y), yy)}>${y}</option>`;
+  return `<span class="dob${cls ? " " + cls : ""}"${id ? ` id="${id}"` : ""}>`
+    + `<select class="dob-d" aria-label="Day of birth">${days}</select>`
+    + `<select class="dob-m" aria-label="Month of birth">${months}</select>`
+    + `<select class="dob-y" aria-label="Year of birth">${years}</select></span>`;
+}
+
+function readDob(container) {
+  if (!container) return "";
+  const d = container.querySelector(".dob-d")?.value || "";
+  const m = container.querySelector(".dob-m")?.value || "";
+  const y = container.querySelector(".dob-y")?.value || "";
+  return d && m && y ? `${y}-${m}-${d}` : "";
+}
+
+// Keep the Day options valid for the chosen month/year (no 31 April, Feb 29 only
+// on leap years). Call once after a picker is inserted into the DOM.
+function wireDob(container) {
+  const d = container?.querySelector(".dob-d");
+  const m = container?.querySelector(".dob-m");
+  const y = container?.querySelector(".dob-y");
+  if (!d || !m || !y) return;
+  const sync = () => {
+    // Day 0 of month N+1 is the last day of month N; default year 2000 (a leap
+    // year) is permissive until a year is picked, then re-clamps.
+    const max = m.value ? new Date(Number(y.value) || 2000, Number(m.value), 0).getDate() : 31;
+    for (const o of d.options) if (o.value) o.disabled = Number(o.value) > max;
+    if (d.selectedOptions[0]?.disabled) d.value = "";
+  };
+  m.addEventListener("change", sync);
+  y.addEventListener("change", sync);
+  sync();
+}
+
 // ─── TOAST ────────────────────────────────────────────────────────────────
 
 let toastTimer = null;
@@ -175,30 +227,31 @@ function openFriendLogin() {
     <label class="field"><span>Name</span>
       <input type="text" id="fl-name" autocomplete="off" placeholder="Your name" maxlength="80" /></label>
     <label class="field"><span>Birthday</span>
-      <input type="date" id="fl-bday" autocomplete="off" /></label>
+      ${dobPickerHTML("", { id: "fl-bday" })}</label>
     <div class="modal-error" id="fl-error"></div>
     <div class="modal-actions">
       <button class="btn" data-close>Cancel</button>
       <button class="btn btn-primary" id="fl-go">Sign in</button>
     </div>`);
   const name = document.getElementById("fl-name");
-  const bday = document.getElementById("fl-bday");
   name.focus();
+  wireDob(document.getElementById("fl-bday"));
   const go = async () => {
     const err = document.getElementById("fl-error");
     err.textContent = "";
-    if (!name.value.trim() || !bday.value) { err.textContent = "Enter your name and birthday."; return; }
+    const bday = readDob(document.getElementById("fl-bday"));
+    if (!name.value.trim() || !bday) { err.textContent = "Enter your name and birthday."; return; }
     try {
-      await API.loginFriend(name.value, bday.value);
+      await API.loginFriend(name.value, bday);
       location.reload();
     } catch (e) {
       err.textContent = msg(e);
     }
   };
   document.getElementById("fl-go").onclick = go;
-  [name, bday].forEach(el => el.addEventListener("keydown", e => {
+  name.addEventListener("keydown", e => {
     if (e.key === "Enter") { e.preventDefault(); go(); }
-  }));
+  });
 }
 
 // ─── OWNER LOGIN ──────────────────────────────────────────────────────────
@@ -638,8 +691,7 @@ async function openFriends() {
     <div class="friend-row ${f.enabled ? "" : "disabled"}" data-fid="${f.id}">
       <div class="fr-main">
         <input class="fr-name" value="${escapeHtml(f.name)}" maxlength="80" placeholder="Name" />
-        <input class="fr-bday" type="date" value="${escapeHtml(f.birthday || "")}"
-               title="Birthday — the friend signs in with name + birthday" />
+        ${dobPickerHTML(f.birthday, { cls: "fr-bday" })}
         <select class="fr-tier">${tierOpts(f.tier)}</select>
         <label class="fr-enabled"><input type="checkbox" class="fr-on" ${f.enabled ? "checked" : ""}/> active</label>
       </div>
@@ -661,12 +713,13 @@ async function openFriends() {
     <div class="friend-list">${rows || `<div class="muted">No friends yet.</div>`}</div>
     <div class="friend-add">
       <input id="nf-name" placeholder="New friend's name" maxlength="80" />
-      <input id="nf-bday" type="date" title="Birthday (used with name to sign in)" />
+      ${dobPickerHTML("", { id: "nf-bday" })}
       <select id="nf-tier">${tierOpts("basic")}</select>
       <button class="btn btn-primary" id="nf-add">Add friend</button>
     </div>`, { wide: true });
 
   const root = document.getElementById("modal");
+  root.querySelectorAll(".dob").forEach(wireDob);   // clamp Day to the chosen month/year
   root.querySelectorAll("[data-copy]").forEach(b => b.onclick = async () => {
     try { await navigator.clipboard.writeText(b.dataset.copy); toast("Invite link copied.", "ok"); }
     catch { toast(b.dataset.copy, "info"); }
@@ -675,7 +728,7 @@ async function openFriends() {
     const row = b.closest(".friend-row");
     const body = {
       name: row.querySelector(".fr-name").value.trim(),
-      birthday: row.querySelector(".fr-bday").value,   // "" clears it server-side
+      birthday: readDob(row),                        // "" clears it server-side
       tier: row.querySelector(".fr-tier").value,
       enabled: row.querySelector(".fr-on").checked,
     };
@@ -702,7 +755,7 @@ async function openFriends() {
   });
   document.getElementById("nf-add").onclick = async () => {
     const name = document.getElementById("nf-name").value.trim();
-    const birthday = document.getElementById("nf-bday").value;
+    const birthday = readDob(document.getElementById("nf-bday"));
     const tier = document.getElementById("nf-tier").value;
     if (!name) return toast("Enter a name.", "error");
     if (!birthday) return toast("Set a birthday so they can sign in.", "error");

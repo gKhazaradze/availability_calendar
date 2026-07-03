@@ -152,6 +152,17 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .field input, .field select, .field textarea { background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 9px 11px; font-size: 14px; font-family: inherit; }
 .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--primary); }
 .field input[type="date"] { color-scheme: dark; }
+
+/* Day-first birthday picker — three selects (Day · Month · Year), rendered the
+   same on every device (a native date input orders its fields by phone region). */
+.dob { display: flex; gap: 6px; }
+.dob select { min-width: 0; background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 9px 8px; font-size: 14px; font-family: inherit; color-scheme: dark; }
+.dob select:focus { outline: none; border-color: var(--primary); }
+/* Compound selectors (0,2,0) so flex + min-width outrank .field input and
+   .friend-add input (0,1,1) — else the add-row Year input keeps its min-width:140. */
+.dob .dob-d { flex: 3 1 0; min-width: 0; }
+.dob .dob-m { flex: 5 1 0; min-width: 0; }   /* the spelled-out month needs the most room */
+.dob .dob-y { flex: 4 1 0; min-width: 0; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .form-grid .span2 { grid-column: 1 / -1; }
 
@@ -214,11 +225,12 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .fr-name { flex: 1; min-width: 120px; background: var(--surface); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 7px 9px; font-size: 14px; font-family: inherit; }
 .fr-tier { background: var(--surface); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 7px 9px; font-family: inherit; }
 .fr-enabled { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
-.fr-bday { background: var(--surface); border: 1px solid var(--line); color: var(--text); border-radius: 7px; padding: 6px 9px; font-family: inherit; font-size: 13px; color-scheme: dark; }
+.fr-main .dob { flex: 1 1 100%; }   /* birthday selects get their own row */
+.fr-main .dob select { background: var(--surface); border-radius: 7px; padding: 7px 8px; }
 .fr-warn { font-size: 12px; color: var(--warn, #d9843b); margin: -2px 0 0; }
 .fr-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .friend-add { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 14px; }
-.friend-add input[type="date"] { flex: 0 1 auto; min-width: 150px; color-scheme: dark; }
+.friend-add .dob { flex: 1 1 240px; min-width: 200px; }
 .friend-add input { flex: 1; min-width: 140px; background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 9px 11px; font-family: inherit; }
 .friend-add select { background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 9px; font-family: inherit; }
 
