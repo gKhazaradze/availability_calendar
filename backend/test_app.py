@@ -713,6 +713,119 @@ def make_trip_full(client, **body):
     return r.get_json()["trip"]
 
 
+# ─── Busy events (kind='busy': unavailable to all, context for full tier) ──
+
+def _busy(client, **body):
+    b = {"kind": "busy", "start_date": "2026-08-10", "end_date": "2026-08-12",
+         "context": "Work conference"}
+    b.update(body)
+    r = client.post("/api/admin/trips", json=b, headers=ADMIN)
+    assert r.status_code == 201, r.get_json()
+    return r.get_json()["trip"]
+
+
+def test_busy_event_owner_sees_kind_and_context(client):
+    t = _busy(client, context="Family wedding")
+    assert t["kind"] == "busy" and t["status"] == "busy"
+    assert t["context"] == "Family wedding"
+    # None of the trip-detail fields exist on a busy event.
+    for absent in ("destination", "car_seats", "free_seats", "participants", "category"):
+        assert absent not in t, absent
+
+
+def test_busy_event_full_friend_sees_context_only(client, make_friend):
+    t = _busy(client, context="Exams all week")
+    f = make_friend(tier="full")
+    trip = _trip_for(client, f["token"], t["id"])
+    assert trip["status"] == "busy" and trip["kind"] == "busy"
+    assert trip["context"] == "Exams all week"
+    # Still no trip detail, and participation keys present (friend invariant).
+    assert "destination" not in trip and "free_seats" not in trip
+    assert trip["on_trip"] is False and trip["my_status"] is None
+
+
+def test_busy_event_basic_and_busy_tiers_get_no_context(client, make_friend):
+    t = _busy(client, context="secret reason")
+    for tier in ("basic", "busy"):
+        f = make_friend(name=f"F{tier}", tier=tier)
+        trip = _trip_for(client, f["token"], t["id"])
+        assert trip["status"] == "busy"
+        assert "context" not in trip, tier
+
+
+def test_busy_event_anon_and_raw_body_no_context_leak(client):
+    _busy(client, context="TopSecretReason", start_date="2026-08-10", end_date="2026-08-12")
+    r = client.get("/api/calendar?from=2026-08-01&to=2026-08-31")
+    t = r.get_json()["trips"][0]
+    assert t["status"] == "busy" and "context" not in t
+    assert b"TopSecretReason" not in r.data
+
+
+def test_busy_event_not_requestable(client, make_friend):
+    t = _busy(client)
+    f = make_friend(tier="full")
+    r = client.post(f"/api/trips/{t['id']}/request-seat", headers=friend_headers(f["token"]))
+    assert r.status_code == 403
+
+
+def test_busy_event_add_participant_rejected(client):
+    t = _busy(client)
+    r = client.post(f"/api/admin/trips/{t['id']}/participants", json={"name": "Alex"}, headers=ADMIN)
+    assert r.status_code == 400 and r.get_json()["error"] == "not_a_trip"
+
+
+def test_busy_event_update_context_and_dates(client):
+    t = _busy(client, context="old")
+    r = client.put(f"/api/admin/trips/{t['id']}",
+                   json={"context": "new reason", "end_date": "2026-08-14"}, headers=ADMIN)
+    trip = r.get_json()["trip"]
+    assert trip["context"] == "new reason" and trip["end_date"] == "2026-08-14"
+    assert trip["kind"] == "busy"
+
+
+def test_busy_event_partial_update_keeps_dates(client):
+    t = _busy(client, start_date="2026-08-10", end_date="2026-08-12", context="a")
+    client.put(f"/api/admin/trips/{t['id']}", json={"context": "b"}, headers=ADMIN)
+    trip = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert trip["start_date"] == "2026-08-10" and trip["end_date"] == "2026-08-12"
+    assert trip["context"] == "b"
+
+
+def test_busy_event_shows_in_calendar_overlap(client, make_friend):
+    t = _busy(client, start_date="2026-08-10", end_date="2026-08-20")
+    f = make_friend(tier="busy")
+    j = client.get("/api/calendar?from=2026-08-15&to=2026-08-16",
+                   headers=friend_headers(f["token"])).get_json()
+    assert [x["id"] for x in j["trips"]] == [t["id"]]
+
+
+def test_busy_event_context_optional(client, make_friend):
+    t = _busy(client, context="")
+    f = make_friend(tier="full")
+    trip = _trip_for(client, f["token"], t["id"])
+    assert trip["context"] == ""
+
+
+def test_create_rejects_bad_kind(client):
+    r = client.post("/api/admin/trips", json={
+        "kind": "weird", "start_date": "2026-08-10", "end_date": "2026-08-12",
+    }, headers=ADMIN)
+    assert r.status_code == 400 and r.get_json()["error"] == "bad_kind"
+
+
+def test_busy_event_rejects_bad_dates(client):
+    r = client.post("/api/admin/trips", json={
+        "kind": "busy", "start_date": "2026-08-20", "end_date": "2026-08-10",
+    }, headers=ADMIN)
+    assert r.status_code == 400 and r.get_json()["error"] == "end_before_start"
+
+
+def test_busy_event_delete(client):
+    t = _busy(client)
+    assert client.delete(f"/api/admin/trips/{t['id']}", headers=ADMIN).status_code == 200
+    assert client.get(f"/api/trips/{t['id']}", headers=ADMIN).status_code == 404
+
+
 # ─── Dates / calendar overlap ──────────────────────────────────────────────
 
 def test_create_rejects_bad_dates(client):

@@ -53,6 +53,8 @@ const ERR = {
   too_many_activities: "Too many activities (max 50).",
   too_many_pins: "Too many pins (max 100).",
   bad_owner_going: "Invalid value for the reserve-a-seat toggle.",
+  bad_kind: "Unknown entry type.",
+  not_a_trip: "That's a busy day, not a trip.",
 };
 function msg(e) {
   return (e && (ERR[e.code] || ERR[e.message])) || (e && e.message) || "Something went wrong.";
@@ -393,11 +395,13 @@ function renderHeader() {
       <span class="badge owner" id="btn-signout" title="Sign out">Owner ✕</span>` : `
       <button class="btn btn-ghost" id="btn-requests">Requests<span id="pending-badge" class="count-badge" hidden>0</span></button>
       <button class="btn btn-ghost" id="btn-friends">Friends</button>
+      <button class="btn btn-ghost" id="btn-new-busy" title="Mark a day unavailable">＋ Busy</button>
       <button class="btn btn-primary" id="btn-new-trip">＋ Trip</button>
       ${viewAsSel}
       <span class="badge owner" id="btn-signout" title="Sign out">Owner ✕</span>`;
     if (!state.viewAs) {
       c.querySelector("#btn-new-trip").onclick = () => openTripForm();
+      c.querySelector("#btn-new-busy").onclick = () => openBusyForm();
       c.querySelector("#btn-friends").onclick = openFriends;
       c.querySelector("#btn-requests").onclick = openRequests;
     }
@@ -694,6 +698,20 @@ function seatPips(free, total) {
 function renderTripCard(t) {
   const owner = effViewer().role === "owner";
 
+  if (t.kind === "busy") {
+    // A busy event: unavailable to all; the reason (context) is present in the
+    // projection only for full-tier friends + owner.
+    return `<div class="trip-card busy">
+      <div class="tc-title"><span class="tc-dot busy"></span>Unavailable</div>
+      <div class="tc-dates">${escapeHtml(fmtRange(t.start_date, t.end_date))}</div>
+      ${t.context ? `<div class="tc-notes">${escapeHtml(t.context)}</div>` : ""}
+      ${owner ? `<div class="tc-actions">
+        <button class="btn btn-ghost" data-editbusy="${t.id}">Edit</button>
+        <button class="btn btn-danger" data-del="${t.id}">Delete</button>
+      </div>` : ""}
+    </div>`;
+  }
+
   if (!t.destination) {
     // busy-only projection (anon, busy tier, or a busy_only trip seen by a friend)
     return `<div class="trip-card busy ${t.on_trip ? "mine" : ""}">
@@ -874,6 +892,7 @@ function wireTripCards() {
   root.querySelectorAll("[data-request]").forEach(b => b.onclick = () => { if (!previewBlock()) act(() => API.requestSeat(+b.dataset.request), "Seat requested."); });
   root.querySelectorAll("[data-leave]").forEach(b => b.onclick = () => { if (!previewBlock()) act(() => API.leaveTrip(+b.dataset.leave), "Removed you from the trip."); });
   root.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => openTripForm(state.tripsById[+b.dataset.edit]));
+  root.querySelectorAll("[data-editbusy]").forEach(b => b.onclick = () => openBusyForm(state.tripsById[+b.dataset.editbusy]));
   root.querySelectorAll("[data-del]").forEach(b => b.onclick = () => delTrip(+b.dataset.del));
   root.querySelectorAll("[data-approve]").forEach(b => b.onclick = () => act(() => API.approveRequest(+b.dataset.approve), "Approved."));
   root.querySelectorAll("[data-decline]").forEach(b => b.onclick = () => act(() => API.declineRequest(+b.dataset.decline), "Declined."));
@@ -964,10 +983,13 @@ async function act(fn, okMsg) {
 
 function delTrip(id) {
   const t = state.tripsById[id];
-  openConfirm(`Delete “${t.destination || "this trip"}”? This removes it and any seat requests.`, async () => {
+  const prompt = t.kind === "busy"
+    ? "Delete this busy day?"
+    : `Delete “${t.destination || "this trip"}”? This removes it and any seat requests.`;
+  openConfirm(prompt, async () => {
     closeModal();
     state.openDay = null;
-    await act(() => API.deleteTrip(id), "Trip deleted.");
+    await act(() => API.deleteTrip(id), t.kind === "busy" ? "Busy day deleted." : "Trip deleted.");
   });
 }
 
@@ -1258,6 +1280,53 @@ function openTripForm(trip, prefill = {}) {
       else await API.createTrip(body);
       closeModal();
       toast(trip ? "Trip updated." : "Trip created.", "ok");
+      await loadAndRender();
+    } catch (e) {
+      err.textContent = msg(e);
+    }
+  };
+}
+
+// ─── BUSY-EVENT FORM (owner) ───────────────────────────────────────────────
+// A busy event marks a day (or span) unavailable for EVERYONE — no destination,
+// seats, or people. Its optional context/reason is shown only to full-tier
+// friends. Reuses the trip create/update endpoints via kind='busy'.
+function openBusyForm(busy, prefill = {}) {
+  const b = busy || {};
+  const v = (k, d) => escapeHtml(b[k] != null ? b[k] : (prefill[k] != null ? prefill[k] : d));
+  openModal(`
+    <div class="modal-head"><h2>${busy ? "Edit busy day" : "Mark a busy day"}</h2><button class="icon-btn" data-close>✕</button></div>
+    <p class="modal-sub">Shows as “unavailable” to everyone — no trip details. Full-access friends can see the reason you add.</p>
+    <div class="form-grid">
+      <label class="field"><span>Start date</span>
+        <input id="b-start" type="date" value="${v("start_date", "")}" /></label>
+      <label class="field"><span>End date</span>
+        <input id="b-end" type="date" value="${v("end_date", "")}" /></label>
+      <label class="field span2"><span>Reason <em>(full-access friends only · optional)</em></span>
+        <textarea id="b-context" maxlength="2000" rows="2" placeholder="Work conference, family, exams…">${v("context", "")}</textarea></label>
+    </div>
+    <div class="modal-error" id="b-error"></div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn btn-primary" id="b-save">${busy ? "Save changes" : "Add busy day"}</button>
+    </div>`, { wide: true });
+
+  document.getElementById("b-save").onclick = async () => {
+    const err = document.getElementById("b-error");
+    err.textContent = "";
+    const body = {
+      kind: "busy",
+      start_date: document.getElementById("b-start").value,
+      end_date: document.getElementById("b-end").value,
+      context: document.getElementById("b-context").value.trim(),
+    };
+    if (!body.start_date || !body.end_date) { err.textContent = "Pick start and end dates."; return; }
+    if (body.end_date < body.start_date) { err.textContent = ERR.end_before_start; return; }
+    try {
+      if (busy) await API.updateTrip(busy.id, body);
+      else await API.createTrip(body);
+      closeModal();
+      toast(busy ? "Busy day updated." : "Busy day added.", "ok");
       await loadAndRender();
     } catch (e) {
       err.textContent = msg(e);

@@ -77,6 +77,7 @@ MAX_DEST = 120
 MAX_LABEL = 120
 MAX_CATEGORY = 40
 MAX_NOTES = 2000
+MAX_CONTEXT = 2000            # busy-event reason, shown to full-tier friends
 MAX_SEATS = 50
 MAX_RANGE_DAYS = 366          # cap on a calendar query window
 MAX_ACTIVITY = 120            # one bullet line
@@ -172,6 +173,13 @@ def init_db():
         for col in ("area_lat", "area_lng", "area_radius_m"):
             if col not in trip_cols:
                 conn.execute(f"ALTER TABLE trips ADD COLUMN {col} REAL")
+        # Busy-event columns (kind discriminator + context reason). App-level
+        # validation enforces the kind values on write; fresh DBs also get the
+        # CHECK from schema.sql.
+        if "kind" not in trip_cols:
+            conn.execute("ALTER TABLE trips ADD COLUMN kind TEXT NOT NULL DEFAULT 'trip'")
+        if "context" not in trip_cols:
+            conn.execute("ALTER TABLE trips ADD COLUMN context TEXT NOT NULL DEFAULT ''")
         conn.commit()
         if first_run:
             app.logger.info(f"Initialized new database at {DATABASE_PATH}")
@@ -356,6 +364,23 @@ def clean_str(value, max_len, *, allow_empty=False, default=""):
     if len(value) > max_len:
         fail(400, "field_too_long")
     return value
+
+
+def parse_busy_payload(body, existing=None):
+    """Validate a busy-event create/update body: start/end dates and an optional
+    `context` reason. Omitted fields keep their current value on update."""
+    if not isinstance(body, dict):
+        fail(400, "bad_body")
+    has = lambda k: k in body
+    start_date = body.get("start_date") if (has("start_date") or existing is None) else existing["start_date"]
+    end_date = body.get("end_date") if (has("end_date") or existing is None) else existing["end_date"]
+    if not valid_date(start_date) or not valid_date(end_date):
+        fail(400, "bad_date")
+    if end_date < start_date:
+        fail(400, "end_before_start")
+    context = (clean_str(body.get("context"), MAX_CONTEXT, allow_empty=True)
+               if (has("context") or existing is None) else existing["context"])
+    return {"start_date": start_date, "end_date": end_date, "context": context}
 
 
 def parse_trip_payload(body, existing=None):
@@ -570,6 +595,24 @@ def project_trip(trip, viewer, db):
         "end_date": trip["end_date"],
         "status": "busy",
     }
+
+    # Busy event: a bare unavailable-day marker. Reads as "busy" to EVERYONE
+    # (no destination/seats/people, even for full-tier friends); only the
+    # `context` reason is shared, and only with full tier + owner. Return early —
+    # none of the trip-detail machinery below applies.
+    if trip["kind"] == "busy":
+        out["kind"] = "busy"
+        if viewer["role"] == "friend":
+            # Keep the friend-projection invariant (always carries my_status) so
+            # the client's session-downgrade check isn't tripped by a busy-only
+            # month. A busy event has no participants, so it's never "yours".
+            out["on_trip"] = False
+            out["my_status"] = None
+        if is_owner or tier == "full":
+            out["context"] = trip["context"]
+        if is_owner:
+            out["updated_at"] = trip["updated_at"]
+        return out
 
     confirmed = confirmed_rows(db, trip["id"])
     confirmed_count = len(confirmed)
@@ -828,10 +871,11 @@ def request_seat(trip_id):
     trip = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
     if trip is None:
         abort(404)
-    # Only a full-tier friend on a normal-privacy trip may request. Every friend
-    # tier already sees the trip exists (busy span) via the calendar, so a 403
-    # here leaks nothing — it's purely "you can't request this".
-    if not (trip["privacy"] == "normal" and viewer["tier"] == "full"):
+    # Only a full-tier friend on a normal-privacy *trip* may request. A busy
+    # event has no seats, so it's never requestable. Every friend tier already
+    # sees the entry exists (busy span) via the calendar, so a 403 here leaks
+    # nothing — it's purely "you can't request this".
+    if not (trip["kind"] == "trip" and trip["privacy"] == "normal" and viewer["tier"] == "full"):
         abort(403)
 
     try:
@@ -895,6 +939,27 @@ def admin_list_trips():
 def admin_create_trip():
     require_admin()
     body = request.get_json(silent=True)
+
+    kind = body.get("kind", "trip") if isinstance(body, dict) else "trip"
+    if kind not in ("trip", "busy"):
+        fail(400, "bad_kind")
+    if kind == "busy":
+        # A busy event: dates + optional context only. All the trip-shaped
+        # columns take neutral defaults (it has no destination/seats/people).
+        b = parse_busy_payload(body)
+        with writing() as db:
+            cur = db.execute(
+                "INSERT INTO trips "
+                "(destination, location_label, start_date, end_date, car_seats, notes, category, privacy, "
+                " kind, context, created_at, updated_at) "
+                "VALUES ('', '', ?, ?, 0, '', 'other', 'normal', 'busy', ?, datetime('now'), datetime('now'))",
+                (b["start_date"], b["end_date"], b["context"]),
+            )
+            trip_id = cur.lastrowid
+        db = get_db()
+        trip = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
+        return jsonify(trip=project_trip(trip, get_viewer(), db)), 201
+
     data = parse_trip_payload(body)
 
     # "I'm going" toggle (default on): reserve one seat for the owner by seating
@@ -951,6 +1016,20 @@ def admin_update_trip(trip_id):
         existing = db.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
         if existing is None:
             fail(404, "not_found")
+
+        # A busy event stays a busy event (kind is immutable); it only carries
+        # dates + context, so it takes a dedicated, simpler update path.
+        if existing["kind"] == "busy":
+            b = parse_busy_payload(body, existing=existing)
+            db.execute(
+                "UPDATE trips SET start_date = ?, end_date = ?, context = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (b["start_date"], b["end_date"], b["context"], trip_id),
+            )
+            db2 = get_db()
+            trip = db2.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
+            return jsonify(trip=project_trip(trip, get_viewer(), db2))
+
         data = parse_trip_payload(body, existing=existing)
 
         # owner-going toggle on edit: add/remove the owner's reserved seat. Absent
@@ -1024,9 +1103,11 @@ def admin_add_participant(trip_id):
     name = body.get("name")
 
     with writing() as db:
-        trip = db.execute("SELECT car_seats FROM trips WHERE id = ?", (trip_id,)).fetchone()
+        trip = db.execute("SELECT car_seats, kind FROM trips WHERE id = ?", (trip_id,)).fetchone()
         if trip is None:
             fail(404, "not_found")
+        if trip["kind"] != "trip":
+            fail(400, "not_a_trip")     # busy events have no roster
 
         if friend_id is not None:
             if not isinstance(friend_id, int) or isinstance(friend_id, bool):

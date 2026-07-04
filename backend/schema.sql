@@ -43,6 +43,13 @@ CREATE TABLE IF NOT EXISTS trips (
   category       TEXT    NOT NULL DEFAULT 'other',-- 'ski' | 'summer' | 'other' | ...
   privacy        TEXT    NOT NULL DEFAULT 'normal'
                          CHECK (privacy IN ('normal','busy_only')),
+  -- kind = 'trip' is the normal roadtrip entry; 'busy' is a bare
+  -- unavailable-day marker (no destination/seats/people) with an optional
+  -- `context` reason shown only to full-tier friends. A busy event reads as
+  -- "unavailable" to everyone regardless of tier.
+  kind           TEXT    NOT NULL DEFAULT 'trip'
+                         CHECK (kind IN ('trip','busy')),
+  context        TEXT    NOT NULL DEFAULT '',
   -- Optional trip location: a dropped pin (lat/lng), widened to a circle when
   -- area_radius_m is set. All three NULL = no location. (Existing DBs get these
   -- via ALTERs in init_db(), so keep them nullable with no non-NULL default.)
