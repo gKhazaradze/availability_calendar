@@ -220,7 +220,8 @@ EXTRAS = {
     "activities": ["Skiing", "Sauna", "Hot wine"],
     "area": {"lat": 42.48, "lng": 44.48, "radius_m": 8000},
     "pins": [
-        {"lat": 42.505, "lng": 44.478, "label": "Lift base", "activity": 0},
+        {"lat": 42.505, "lng": 44.478, "label": "Lift base", "activity": 0,
+         "maps_url": "https://maps.app.goo.gl/liftbase"},
         {"lat": 42.47, "lng": 44.5, "label": "Chalet", "activity": None},
     ],
 }
@@ -232,7 +233,8 @@ def test_extras_roundtrip_for_owner(client, make_trip):
     assert got["activities"] == ["Skiing", "Sauna", "Hot wine"]
     assert got["area"] == {"lat": 42.48, "lng": 44.48, "radius_m": 8000.0}
     assert got["pins"] == [
-        {"lat": 42.505, "lng": 44.478, "label": "Lift base", "maps_url": "", "activity": 0},
+        {"lat": 42.505, "lng": 44.478, "label": "Lift base",
+         "maps_url": "https://maps.app.goo.gl/liftbase", "activity": 0},
         {"lat": 42.47, "lng": 44.5, "label": "Chalet", "maps_url": "", "activity": None},
     ]
 
@@ -276,8 +278,8 @@ def test_busy_and_anon_never_see_extras(client, make_friend, make_trip):
         t = r.get_json()["trips"][0]
         for forbidden in ("activities", "area", "pins"):
             assert forbidden not in t, forbidden
-        # Raw-body sweep: no activity text, pin label, or coordinate leaks.
-        for secret in (b"Skiing", b"Lift base", b"Chalet", b"42.48"):
+        # Raw-body sweep: no activity text, pin label, coordinate, or maps link leaks.
+        for secret in (b"Skiing", b"Lift base", b"Chalet", b"42.48", b"maps.app.goo.gl"):
             assert secret not in r.data, secret
 
 
