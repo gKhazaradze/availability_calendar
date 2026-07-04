@@ -232,8 +232,8 @@ def test_extras_roundtrip_for_owner(client, make_trip):
     assert got["activities"] == ["Skiing", "Sauna", "Hot wine"]
     assert got["area"] == {"lat": 42.48, "lng": 44.48, "radius_m": 8000.0}
     assert got["pins"] == [
-        {"lat": 42.505, "lng": 44.478, "label": "Lift base", "activity": 0},
-        {"lat": 42.47, "lng": 44.5, "label": "Chalet", "activity": None},
+        {"lat": 42.505, "lng": 44.478, "label": "Lift base", "maps_url": "", "activity": 0},
+        {"lat": 42.47, "lng": 44.5, "label": "Chalet", "maps_url": "", "activity": None},
     ]
 
 
@@ -303,7 +303,7 @@ def test_extras_kept_on_partial_update_replaced_when_sent(client, make_trip):
     }, headers=ADMIN)
     got = r.get_json()["trip"]
     assert got["activities"] == ["Rafting"]
-    assert got["pins"] == [{"lat": 1.0, "lng": 2.0, "label": "Put-in", "activity": 0}]
+    assert got["pins"] == [{"lat": 1.0, "lng": 2.0, "label": "Put-in", "maps_url": "", "activity": 0}]
     # Empty lists and a null area clear everything.
     r = client.put(f"/api/admin/trips/{t['id']}",
                    json={"activities": [], "pins": [], "area": None}, headers=ADMIN)
@@ -322,6 +322,27 @@ def test_pins_alone_link_against_stored_activities(client, make_trip):
     r = client.put(f"/api/admin/trips/{t['id']}",
                    json={"pins": [{"lat": 5, "lng": 6, "activity": 2}]}, headers=ADMIN)
     assert r.status_code == 400 and r.get_json()["error"] == "bad_pin_activity"
+
+
+def test_pin_maps_url_roundtrips_falls_back_and_rejects_bad_schemes(client, make_trip):
+    # A custom http(s) link round-trips verbatim.
+    t = make_trip(activities=["Skiing"], pins=[
+        {"lat": 1, "lng": 2, "label": "Base", "activity": 0,
+         "maps_url": "https://maps.app.goo.gl/abc123"},
+    ])
+    got = client.get(f"/api/trips/{t['id']}", headers=ADMIN).get_json()["trip"]
+    assert got["pins"][0]["maps_url"] == "https://maps.app.goo.gl/abc123"
+    # Omitting it (or sending blank) stores "" — the client renders a coordinate
+    # link in that case, so nothing is lost.
+    r = client.put(f"/api/admin/trips/{t['id']}",
+                   json={"pins": [{"lat": 1, "lng": 2, "activity": 0}]}, headers=ADMIN)
+    assert r.get_json()["trip"]["pins"][0]["maps_url"] == ""
+    # Non-http(s) values are rejected — they'd otherwise become an unsafe href.
+    for bad in ("javascript:alert(1)", "data:text/html,x", "ftp://host/x", "notaurl"):
+        r = client.put(f"/api/admin/trips/{t['id']}",
+                       json={"pins": [{"lat": 1, "lng": 2, "activity": 0, "maps_url": bad}]},
+                       headers=ADMIN)
+        assert r.status_code == 400 and r.get_json()["error"] == "bad_pin_url", bad
 
 
 def test_extras_validation_rejects_garbage(client, make_trip):
@@ -345,6 +366,9 @@ def test_extras_validation_rejects_garbage(client, make_trip):
         {"pins": [{"lat": 0, "lng": 0, "activity": -1}]},
         {"pins": [{"lat": 0, "lng": 0, "label": "y" * 121}]},
         {"pins": [{"lat": 0, "lng": 0}] * 101},
+        {"pins": [{"lat": 0, "lng": 0, "maps_url": "javascript:alert(1)"}]},
+        {"pins": [{"lat": 0, "lng": 0, "maps_url": "/relative"}]},
+        {"pins": [{"lat": 0, "lng": 0, "maps_url": "h" * 501}]},
     ]
     for body in bad_bodies:
         r = client.put(f"/api/admin/trips/{t['id']}", json=body, headers=ADMIN)

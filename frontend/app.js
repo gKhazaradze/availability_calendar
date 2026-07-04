@@ -49,6 +49,7 @@ const ERR = {
   bad_area: "That map location looks invalid.",
   bad_pins: "One of the map pins looks invalid.",
   bad_pin_activity: "A pin points at an activity that doesn't exist.",
+  bad_pin_url: "A pin's Google Maps link must be a full http(s) link.",
   bad_activities: "Activities must be short text lines.",
   too_many_activities: "Too many activities (max 50).",
   too_many_pins: "Too many pins (max 100).",
@@ -164,6 +165,22 @@ function makeMap(el, opts = {}) {
 function pinName(p, activities) {
   const act = p.activity != null && Array.isArray(activities) ? activities[p.activity] : null;
   return p.label || act || "Spot";
+}
+
+// A "search this coordinate" Google Maps link — drops a Maps pin on the exact
+// spot and deep-links to the app on mobile. Used as the fallback when a pin has
+// no custom link.
+function gmapsCoordUrl(lat, lng) {
+  return `https://www.google.com/maps/search/?api=1&query=${lat}%2C${lng}`;
+}
+
+// Where a pin's "Open in Google Maps" link points: the owner's custom link when
+// it's a real http(s) URL, else a coordinate link. The scheme check is a second
+// line of defence — the backend already rejects non-http(s) — so a bad stored
+// value can never become a javascript:/data: href.
+function pinMapsHref(p) {
+  const u = (p.maps_url || "").trim();
+  return /^https?:\/\//i.test(u) ? u : gmapsCoordUrl(p.lat, p.lng);
 }
 
 // Leaflet doesn't notice its container changing size (modal resize grip,
@@ -795,7 +812,8 @@ function buildTripMap(el, t) {
   for (const p of (t.pins || [])) {
     const act = p.activity != null && t.activities ? t.activities[p.activity] : null;
     const popup = `<b>${escapeHtml(pinName(p, t.activities))}</b>`
-      + (act && p.label ? `<br><span class="small">${escapeHtml(act)}</span>` : "");
+      + (act && p.label ? `<br><span class="small">${escapeHtml(act)}</span>` : "")
+      + `<br><a class="pin-maps-link" href="${escapeHtml(pinMapsHref(p))}" target="_blank" rel="noopener noreferrer">Open in Google Maps ↗</a>`;
     const marker = L.marker([p.lat, p.lng], { opacity: .92 })
       .bindTooltip(escapeHtml(pinName(p, t.activities)), { direction: "top" })
       .bindPopup(popup);
@@ -1134,10 +1152,14 @@ function openTripForm(trip, prefill = {}) {
         <input type="text" data-pin-label="${i}" value="${escapeHtml(p.label || "")}" maxlength="120" placeholder="Label (e.g. lift base, chalet)" />
         <select data-pin-act="${i}" title="Linked activity">${options(i)}</select>
         <button type="button" class="mini-btn danger" data-pin-del="${i}" title="Remove pin">✕</button>
+        <input type="url" class="pin-url" data-pin-url="${i}" value="${escapeHtml(p.maps_url || "")}" maxlength="500" placeholder="Google Maps link (optional — blank uses the pin's location)" />
       </div>`).join("");
     pinsBox.querySelectorAll("[data-pin-label]").forEach(inp => {
       inp.oninput = () => { geo.pins[+inp.dataset.pinLabel].label = inp.value; };
       inp.onchange = () => syncPinMarkers();   // tooltip picks up the new label
+    });
+    pinsBox.querySelectorAll("[data-pin-url]").forEach(inp => {
+      inp.oninput = () => { geo.pins[+inp.dataset.pinUrl].maps_url = inp.value; };
     });
     pinsBox.querySelectorAll("[data-pin-act]").forEach(sel => {
       sel.onchange = () => {
@@ -1235,7 +1257,7 @@ function openTripForm(trip, prefill = {}) {
         geo.area = { lat: r6(e.latlng.lat), lng: r6(e.latlng.lng), radius_m: geo.area ? geo.area.radius_m : null };
         syncArea();
       } else {
-        geo.pins.push({ lat: r6(e.latlng.lat), lng: r6(e.latlng.lng), label: "", activity: null });
+        geo.pins.push({ lat: r6(e.latlng.lat), lng: r6(e.latlng.lng), label: "", maps_url: "", activity: null });
         redrawPins(); syncPinMarkers();
         pinsBox.querySelector(`[data-pin-label="${geo.pins.length - 1}"]`)?.focus();
       }
@@ -1272,6 +1294,7 @@ function openTripForm(trip, prefill = {}) {
       area: geo.area,
       pins: geo.pins.map(p => ({
         lat: p.lat, lng: p.lng, label: (p.label || "").trim(),
+        maps_url: (p.maps_url || "").trim(),
         activity: p.activity != null && idxMap.has(p.activity) ? idxMap.get(p.activity) : null,
       })),
     };

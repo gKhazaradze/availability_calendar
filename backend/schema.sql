@@ -109,7 +109,8 @@ CREATE TABLE IF NOT EXISTS pins (
   activity_id INTEGER          REFERENCES activities(id) ON DELETE SET NULL,
   lat         REAL    NOT NULL,
   lng         REAL    NOT NULL,
-  label       TEXT    NOT NULL DEFAULT ''
+  label       TEXT    NOT NULL DEFAULT '',
+  maps_url    TEXT    NOT NULL DEFAULT ''      -- optional http(s) link (viewers fall back to a coordinate link)
 );
 CREATE INDEX IF NOT EXISTS idx_pins_trip ON pins (trip_id);
 

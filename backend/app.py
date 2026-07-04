@@ -48,6 +48,7 @@ import sqlite3
 from datetime import datetime
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import (
     Flask, request, jsonify, g, abort, make_response, send_from_directory,
@@ -83,6 +84,7 @@ MAX_RANGE_DAYS = 366          # cap on a calendar query window
 MAX_ACTIVITY = 120            # one bullet line
 MAX_ACTIVITIES = 50           # bullets per trip
 MAX_PIN_LABEL = 120
+MAX_PIN_URL = 500             # optional Google-Maps link per pin
 MAX_PINS = 100                # markers per trip
 MAX_AREA_RADIUS_M = 500_000   # 500 km — plenty for "somewhere in this region"
 
@@ -180,6 +182,11 @@ def init_db():
             conn.execute("ALTER TABLE trips ADD COLUMN kind TEXT NOT NULL DEFAULT 'trip'")
         if "context" not in trip_cols:
             conn.execute("ALTER TABLE trips ADD COLUMN context TEXT NOT NULL DEFAULT ''")
+        # A pin's optional Google-Maps link (older DBs predate it; fresh ones get
+        # it from schema.sql).
+        pin_cols = {r[1] for r in conn.execute("PRAGMA table_info(pins)").fetchall()}
+        if "maps_url" not in pin_cols:
+            conn.execute("ALTER TABLE pins ADD COLUMN maps_url TEXT NOT NULL DEFAULT ''")
         conn.commit()
         if first_run:
             app.logger.info(f"Initialized new database at {DATABASE_PATH}")
@@ -366,6 +373,19 @@ def clean_str(value, max_len, *, allow_empty=False, default=""):
     return value
 
 
+def clean_url(value, max_len):
+    """An optional external link (a pin's Google-Maps URL), '' when blank. Only
+    http(s) with a host is allowed — other schemes (javascript:, data:, …) are
+    rejected so the value is safe to render as an href downstream."""
+    url = clean_str(value, max_len, allow_empty=True)
+    if not url:
+        return ""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        fail(400, "bad_pin_url")
+    return url
+
+
 def parse_busy_payload(body, existing=None):
     """Validate a busy-event create/update body: start/end dates and an optional
     `context` reason. Omitted fields keep their current value on update."""
@@ -492,10 +512,11 @@ def parse_activities(value):
 
 
 def parse_pins(value, n_activities):
-    """Labeled map markers: [{lat, lng, label?, activity?}]. `activity` is an
-    INDEX into the trip's activity list (the one being submitted alongside, or
-    the stored one when only pins are updated) — the client can't know row ids
-    for rows this same request creates."""
+    """Labeled map markers: [{lat, lng, label?, activity?, maps_url?}]. `activity`
+    is an INDEX into the trip's activity list (the one being submitted alongside,
+    or the stored one when only pins are updated) — the client can't know row ids
+    for rows this same request creates. `maps_url` is an optional http(s) link
+    (viewers fall back to a coordinate link when it's blank)."""
     if not isinstance(value, list):
         fail(400, "bad_pins")
     if len(value) > MAX_PINS:
@@ -512,6 +533,7 @@ def parse_pins(value, n_activities):
             "lat": coord(p.get("lat"), -90, 90, "bad_pins"),
             "lng": coord(p.get("lng"), -180, 180, "bad_pins"),
             "label": clean_str(p.get("label"), MAX_PIN_LABEL, allow_empty=True),
+            "maps_url": clean_url(p.get("maps_url"), MAX_PIN_URL),
             "activity": idx,
         })
     return out
@@ -561,9 +583,9 @@ def replace_trip_extras(db, trip_id, activities, pins):
         db.execute("DELETE FROM pins WHERE trip_id = ?", (trip_id,))
         for p in pins:
             db.execute(
-                "INSERT INTO pins (trip_id, activity_id, lat, lng, label) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO pins (trip_id, activity_id, lat, lng, label, maps_url) VALUES (?, ?, ?, ?, ?, ?)",
                 (trip_id, ids[p["activity"]] if p["activity"] is not None else None,
-                 p["lat"], p["lng"], p["label"]),
+                 p["lat"], p["lng"], p["label"], p["maps_url"]),
             )
 
 
@@ -672,9 +694,10 @@ def project_trip(trip, viewer, db):
         act_index = {a["id"]: i for i, a in enumerate(acts)}
         out["pins"] = [
             {"lat": p["lat"], "lng": p["lng"], "label": p["label"],
+             "maps_url": p["maps_url"],
              "activity": act_index.get(p["activity_id"])}
             for p in db.execute(
-                "SELECT lat, lng, label, activity_id FROM pins "
+                "SELECT lat, lng, label, maps_url, activity_id FROM pins "
                 "WHERE trip_id = ? ORDER BY id", (trip["id"],),
             ).fetchall()
         ]
