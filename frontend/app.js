@@ -820,8 +820,15 @@ function buildTripMap(el, t) {
       if (!markers || !markers.length) return;
       el.scrollIntoView({ behavior: "smooth", block: "nearest" });
       if (markers.length === 1) {
-        map.setView(markers[0].getLatLng(), Math.max(map.getZoom(), 14), { animate: true });
-        markers[0].openPopup();
+        const marker = markers[0];
+        map.setView(marker.getLatLng(), Math.max(map.getZoom(), 14), { animate: true });
+        // Show the popup without Leaflet's default auto-pan — it would nudge the
+        // map to fit the popup and knock the just-centred pin back off-centre.
+        const popup = marker.getPopup();
+        const autoPan = popup.options.autoPan;
+        popup.options.autoPan = false;
+        marker.openPopup();
+        popup.options.autoPan = autoPan;
       } else {
         map.fitBounds(L.featureGroup(markers).getBounds().pad(0.3), { maxZoom: 15 });
       }
