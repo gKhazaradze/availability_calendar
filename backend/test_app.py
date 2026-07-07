@@ -98,14 +98,15 @@ def test_busy_tier_sees_only_busy_span(client, make_friend, make_trip):
         assert forbidden not in trip, forbidden
 
 
-def test_basic_tier_sees_seats_not_people(client, make_friend, make_trip):
+def test_basic_tier_sees_destination_not_seats_or_people(client, make_friend, make_trip):
     t = make_trip(destination=DEST, car_seats=3, notes="leaving 6am")
     f = make_friend(tier="basic")
     trip = _trip_for(client, f["token"], t["id"])
     assert trip["destination"] == DEST
-    assert trip["free_seats"] == 3
-    assert "participants" not in trip
-    assert "notes" not in trip
+    # Seat counts are full-tier only now — hidden from basic, and not derivable
+    # (car_seats/confirmed_count are withheld too, so free_seats can't be recomputed).
+    for hidden in ("free_seats", "car_seats", "confirmed_count", "participants", "notes"):
+        assert hidden not in trip, hidden
     assert trip["can_request"] is False        # only full may request
 
 
@@ -114,6 +115,7 @@ def test_full_tier_sees_everything_visible(client, make_friend, make_trip):
     f = make_friend(tier="full")
     trip = _trip_for(client, f["token"], t["id"])
     assert trip["destination"] == DEST
+    assert trip["free_seats"] == 3             # seat counts are full-tier detail
     assert trip["notes"] == "leaving 6am"
     assert trip["participants"] == []
     assert trip["my_status"] is None
@@ -198,6 +200,55 @@ def test_confirmed_by_request_sets_on_trip_and_blocks_request(client, make_frien
     assert trip["can_request"] is False
 
 
+def test_linked_member_sees_full_detail_regardless_of_tier(client, make_friend, make_trip):
+    # The owner adds a low-tier friend's ACCOUNT to a trip: being on the trip
+    # unlocks full detail (seats, activities, pins, names, notes) for that one
+    # trip, no matter the friend's tier.
+    for tier in ("busy", "basic"):
+        t = make_trip(**EXTRAS, destination=DEST, car_seats=3, notes="leaving 6am")
+        f = make_friend(name=f"Member-{tier}", tier=tier)
+        r = client.post(f"/api/admin/trips/{t['id']}/participants",
+                        json={"friend_id": f["id"]}, headers=ADMIN)
+        assert r.status_code == 201, r.get_json()
+        trip = _trip_for(client, f["token"], t["id"])
+        assert trip["on_trip"] is True
+        assert trip["destination"] == DEST
+        assert trip["free_seats"] == 2                       # 3 seats − 1 (them)
+        assert trip["activities"] == EXTRAS["activities"]
+        assert trip["notes"] == "leaving 6am"
+        assert trip["pins"][0]["label"] == "Lift base"
+        assert {"name": f"Member-{tier}"} in trip["participants"]
+        assert trip["can_request"] is False                  # already on it
+
+
+def test_name_match_alone_does_not_unlock_detail(client, make_friend, make_trip):
+    # A guest the owner typed by NAME (no account link) lights up a same-named
+    # friend's calendar (on_trip) but must NOT expose the trip's full detail — a
+    # name collision isn't proof of identity.
+    t = make_trip(**EXTRAS, destination=DEST, car_seats=3, notes="leaving 6am")
+    client.post(f"/api/admin/trips/{t['id']}/participants", json={"name": "Casey"}, headers=ADMIN)
+    for tier in ("busy", "basic"):
+        f = make_friend(name="Casey", tier=tier)
+        trip = _trip_for(client, f["token"], t["id"])
+        assert trip["on_trip"] is True
+        for hidden in ("free_seats", "activities", "pins", "participants", "notes"):
+            assert hidden not in trip, (tier, hidden)
+
+
+def test_linked_member_on_busy_only_trip_still_hidden(client, make_friend, make_trip):
+    # busy_only trumps even a linked membership: a private trip stays a bare busy
+    # span for its participants — only the owner sees a private trip's detail.
+    t = make_trip(privacy="busy_only", destination=DEST, car_seats=3)
+    f = make_friend(tier="full")
+    client.post(f"/api/admin/trips/{t['id']}/participants",
+                json={"friend_id": f["id"]}, headers=ADMIN)
+    trip = _trip_for(client, f["token"], t["id"])
+    assert trip["on_trip"] is True
+    assert trip["status"] == "busy"
+    for hidden in ("destination", "free_seats", "activities", "participants"):
+        assert hidden not in trip, hidden
+
+
 def test_error_bodies_never_leak_destination(client, make_friend, make_trip):
     t = make_trip(destination="SecretValley", car_seats=1, notes="secret note")
     basic = make_friend(tier="basic")
@@ -212,8 +263,8 @@ def test_error_bodies_never_leak_destination(client, make_friend, make_trip):
 
 
 # ─── Activities, map area & pins (trip extras) ─────────────────────────────
-# activities + area travel with the basic detail block; exact labeled pins are
-# full/owner only. Everything replaces wholesale on save; pins link to
+# area travels with the basic detail block; the activity list + exact labeled
+# pins are full/owner only. Everything replaces wholesale on save; pins link to
 # activities by index into the submitted (or stored) list.
 
 EXTRAS = {
@@ -250,12 +301,12 @@ def test_area_without_radius_is_a_plain_pin(client, make_trip):
     assert got["area"]["radius_m"] is None
 
 
-def test_basic_sees_activities_and_area_but_not_pins(client, make_friend, make_trip):
+def test_basic_sees_area_but_not_activities_or_pins(client, make_friend, make_trip):
     t = make_trip(**EXTRAS)
     f = make_friend(tier="basic")
     trip = _trip_for(client, f["token"], t["id"])
-    assert trip["activities"] == EXTRAS["activities"]
-    assert trip["area"]["lat"] == 42.48
+    assert trip["area"]["lat"] == 42.48        # rough map area stays with basic
+    assert "activities" not in trip            # activity list is full-tier only
     assert "pins" not in trip
 
 
@@ -614,7 +665,7 @@ def test_owner_going_visible_to_full_friend_not_basic(client, make_friend):
     bt = client.get(f"/api/trips/{t['id']}", headers=friend_headers(basic["token"])).get_json()["trip"]
     assert ft["participants"] == [{"name": app_module.OWNER_NAME}]   # full sees the owner by name
     assert ft["free_seats"] == 2
-    assert "participants" not in bt and bt["free_seats"] == 2         # basic: seat count only
+    assert "participants" not in bt and "free_seats" not in bt        # basic: neither names nor seat count
 
 
 def test_owner_going_bumps_zero_seat_trip_to_one(client):

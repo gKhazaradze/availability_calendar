@@ -122,8 +122,10 @@ Then in a browser:
 5. In a separate **incognito** window, click **Sign in**, enter that friend's
    name + birthday, and confirm:
    - `busy` sees only "unavailable" days,
-   - `basic` sees destination + free seats but no names,
-   - `full` sees names/notes and can **request a seat**.
+   - `basic` sees destination + map area but no seats, activities, or names,
+   - `full` sees free seats, activities, names/notes and can **request a seat**,
+   - a friend of **any** tier whose account you add to a trip (or whose request
+     you approve) sees that trip in full.
 
    (Legacy `?u=<token>` invite links still work as a fallback — **copy link** in
    the Friends drawer — but name + birthday is the way friends sign in now.)

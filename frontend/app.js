@@ -816,9 +816,13 @@ function renderTripCard(t) {
     </div>`;
   }
 
-  const seats = (t.car_seats > 0)
-    ? `<div class="tc-seats"><span class="seat-count">${t.free_seats} of ${t.car_seats} seat${t.car_seats === 1 ? "" : "s"} free</span>${seatPips(t.free_seats, t.car_seats)}</div>`
-    : `<div class="tc-seats muted">No car seats offered</div>`;
+  // Seat counts are full-tier detail: absent (not 0) for basic/busy, so drop the
+  // block entirely rather than mislabel a hidden count as "no seats offered".
+  const seats = (t.car_seats == null)
+    ? ""
+    : (t.car_seats > 0)
+      ? `<div class="tc-seats"><span class="seat-count">${t.free_seats} of ${t.car_seats} seat${t.car_seats === 1 ? "" : "s"} free</span>${seatPips(t.free_seats, t.car_seats)}</div>`
+      : `<div class="tc-seats muted">No car seats offered</div>`;
 
   let people = "";
   if (owner) {
@@ -837,11 +841,11 @@ function renderTripCard(t) {
     actions = friendActions(t);
   }
 
-  // Activities (basic tier +) and the map (area for basic, + labeled pins for
+  // Activities (full tier +) and the map (area for basic, + labeled pins for
   // full/owner). The map div is instantiated by wireTripCards() after insert.
   // An activity with a linked pin renders clickable (jump the map to the pin) —
   // only when the viewer's projection actually includes pins AND the map will
-  // render, so basic-tier bullets stay plain text.
+  // render, so a card with activities but no pins keeps plain-text bullets.
   const hasGeo = t.area || (Array.isArray(t.pins) && t.pins.length);
   const mapBox = hasGeo && mapsAvailable() ? `<div class="tc-map" data-map="${t.id}"></div>` : "";
   const pinnedActs = new Set(
@@ -1469,8 +1473,9 @@ async function openFriends() {
     <div class="modal-head"><h2>Friends</h2><button class="icon-btn" data-close>✕</button></div>
     <p class="modal-sub">Each friend signs in with their <b>name + birthday</b>, so set both.
       Tier sets how much they see:
-      <b>busy</b> = only “unavailable”, <b>basic</b> = destination, free seats, activities &amp; map area,
-      <b>full</b> = + who's coming, notes, exact map pins, and can request a seat.</p>
+      <b>busy</b> = only “unavailable”, <b>basic</b> = destination &amp; map area,
+      <b>full</b> = + free seats, activities, who's coming, notes, exact map pins, and can request a seat.
+      Anyone you add to a trip sees <i>that</i> trip in full, whatever their tier.</p>
     <div class="friend-list">${rows || `<div class="muted">No friends yet.</div>`}</div>
     <div class="friend-add">
       <input id="nf-name" placeholder="New friend's name" maxlength="80" />

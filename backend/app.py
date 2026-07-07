@@ -18,9 +18,14 @@ Two credential types (the one real departure from the roadtrip template):
     immediately. (Legacy `?u=<token>` invite links still resolve the same token.)
     Tiers:
       busy  → only that a day is unavailable (no destination/seats/people)
-      basic → + destination, dates, free-seat count, activity list, map area
-      full  → + participant names, notes, labeled map pins, and the ability
-              to request a seat
+      basic → + destination, dates, and the rough map area
+      full  → + free-seat count, activity list, participant names, notes,
+              labeled map pins, and the ability to request a seat
+    Being ON a trip overrides the tier for that one trip: a friend who is a
+    linked participant (the owner added their account, or their request was
+    approved) sees it at full detail whatever their tier. A bare name match
+    doesn't count, and a private `busy_only` trip stays hidden even from its
+    own participants.
   - Anonymous: no credential. May READ the calendar, but every trip collapses to
     a bare busy span (dates only) — the same shape the busy tier sees, so the
     public learns *when* George is away but nothing about the trip. Everything
@@ -639,18 +644,23 @@ def project_trip(trip, viewer, db):
     confirmed = confirmed_rows(db, trip["id"])
     confirmed_count = len(confirmed)
 
-    # Is the viewing friend on this trip — by their friend_id OR a case-insensitive
-    # match on their account name against a confirmed participant (so an
-    # owner-added guest named "Alex" lights up for the friend "Alex")? Computed for
-    # EVERY tier, even busy / busy_only, so the calendar can mark the viewer's own
-    # trips green. Only the boolean is exposed — never anyone else's name.
+    # Is the viewing friend on this trip? Two signals: a LINKED membership — a
+    # confirmed participant carrying their friend_id (the owner added their
+    # account, or their seat request was approved) — or a case-insensitive match
+    # of their account name against a confirmed participant (so an owner-added
+    # guest named "Alex" lights up for the friend "Alex"). Computed for EVERY
+    # tier, even busy / busy_only, so the calendar can mark the viewer's own
+    # trips green. Only the boolean is exposed here — never anyone else's name.
+    linked_member = False
     if viewer["role"] == "friend":
         nm = (viewer["name"] or "").strip().lower()
-        out["on_trip"] = any(
-            (viewer["friend_id"] is not None and c["friend_id"] == viewer["friend_id"])
-            or (nm and (c["display_name"] or "").strip().lower() == nm)
-            for c in confirmed
+        linked_member = viewer["friend_id"] is not None and any(
+            c["friend_id"] == viewer["friend_id"] for c in confirmed
         )
+        name_match = bool(nm) and any(
+            (c["display_name"] or "").strip().lower() == nm for c in confirmed
+        )
+        out["on_trip"] = linked_member or name_match
         # The viewer's OWN linked row status, if any — drives the Cancel (pending)
         # / Leave (confirmed) button. Their own data, so it's exposed at every
         # tier; it never reveals anyone else's row. Self-removal is done via
@@ -662,33 +672,49 @@ def project_trip(trip, viewer, db):
         ).fetchone()
         out["my_status"] = own["status"] if own else None
 
-    show_detail = is_owner or (trip["privacy"] == "normal" and tier in ("basic", "full"))
+    # Being a LINKED member of the trip unlocks full detail regardless of tier:
+    # once the owner puts your account on a trip (or your request is approved),
+    # you see that one trip exactly as a full-tier friend would. A bare name
+    # match does NOT unlock detail — it only sets on_trip above — so a friend who
+    # merely shares a name with a guest can't read that guest's trip. The
+    # busy_only privacy flag still trumps this (it hides a trip from even a
+    # full-tier friend), so a private trip stays a bare busy span for everyone
+    # but the owner.
+    effective_full = tier == "full" or linked_member
+    show_detail = is_owner or (trip["privacy"] == "normal" and (effective_full or tier == "basic"))
     if not show_detail:
         return out
 
+    # Basic detail block: WHERE George is going and its rough map location — the
+    # destination-level facts. Seat availability and the activity list are NOT
+    # here; they moved to the full-tier block below, so a basic friend learns
+    # the destination and rough area but not how full the car is or what's planned.
     out.update({
         "destination": trip["destination"],
         "location_label": trip["location_label"],
         "category": trip["category"],
-        "car_seats": trip["car_seats"],
-        "free_seats": max(0, trip["car_seats"] - confirmed_count),
-        "confirmed_count": confirmed_count,
     })
-
-    # Activities + the trip's rough location ride with the basic detail block —
-    # they say WHAT the trip offers and roughly where, same sensitivity as
-    # destination. Exact labeled pins are detail-tier (full/owner) below.
-    acts = db.execute(
-        "SELECT id, name FROM activities WHERE trip_id = ? ORDER BY position, id",
-        (trip["id"],),
-    ).fetchall()
-    out["activities"] = [a["name"] for a in acts]
     if trip["area_lat"] is not None and trip["area_lng"] is not None:
         out["area"] = {"lat": trip["area_lat"], "lng": trip["area_lng"],
                        "radius_m": trip["area_radius_m"]}
 
-    show_names = is_owner or (trip["privacy"] == "normal" and tier == "full")
+    show_names = is_owner or (trip["privacy"] == "normal" and effective_full)
     if show_names:
+        # Full-tier detail: seat counts + the activity list + exact labeled pins.
+        # Seat counts live here (not with the basic block) so a basic friend
+        # can't see how full the car is — and can't recompute a hidden free_seats
+        # from car_seats/confirmed_count either, since all three are withheld
+        # together.
+        out.update({
+            "car_seats": trip["car_seats"],
+            "free_seats": max(0, trip["car_seats"] - confirmed_count),
+            "confirmed_count": confirmed_count,
+        })
+        acts = db.execute(
+            "SELECT id, name FROM activities WHERE trip_id = ? ORDER BY position, id",
+            (trip["id"],),
+        ).fetchall()
+        out["activities"] = [a["name"] for a in acts]
         # Labeled map pins, with `activity` as an index into out["activities"]
         # (stable for display and for the owner's form round-trip alike).
         act_index = {a["id"]: i for i, a in enumerate(acts)}

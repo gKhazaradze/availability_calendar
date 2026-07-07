@@ -21,11 +21,17 @@ server-side** — a lower tier is never sent fields it shouldn't see.
 | Tier | Sees |
 |------|------|
 | `busy`  | only that a day is **unavailable** (no destination, seats, or people) |
-| `basic` | + destination, dates, and **free-seat count** |
-| `full`  | + participant names, notes, and can **request a seat** |
+| `basic` | + destination, dates, and the rough **map area** |
+| `full`  | + **free-seat count**, activities, participant names, notes, map pins, and can **request a seat** |
+
+Whatever a friend's tier, once they're **on a trip** — I added their account, or
+their seat request was approved — they see *that* trip in full. Being on the trip
+overrides the tier for that one trip. (A bare name match doesn't count; it only
+marks the day as theirs.)
 
 A trip can also be marked **private** (`busy_only`), which collapses it to
-"unavailable" for *everyone* but me — even full-tier friends.
+"unavailable" for *everyone* but me — even full-tier friends, and even the people
+on the trip.
 
 Anyone who opens the bare link with **no personal invite** still gets a public
 view of the same calendar, but every trip collapses to an opaque **busy** span —
