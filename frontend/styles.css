@@ -150,12 +150,15 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .cal-grid.head { margin-bottom: 6px; }
 .wd { color: var(--faint); font-size: 12px; font-weight: 600; text-align: center; text-transform: uppercase; letter-spacing: .04em; }
 
-.cell { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; min-height: 86px; padding: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: .12s; overflow: hidden; }
+.cell { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; min-height: 86px; padding: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: .12s; overflow: hidden; user-select: none; -webkit-user-select: none; }
 .cell:hover { border-color: var(--faint); }
 .cell.other { opacity: .42; }
 .cell.free-day { background: var(--surface); }
 .cell.busy-day { background: linear-gradient(180deg, var(--surface), var(--surface-2)); }
 .cell.today { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+/* Live highlight while the owner drags a date span to create a trip/busy entry. */
+.cell.selecting { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 16%, var(--surface)); box-shadow: inset 0 0 0 1px var(--primary); }
+.cell.selecting.other { opacity: .7; }
 .cell-num { font-size: 12.5px; color: var(--muted); font-weight: 600; }
 .cell.today .cell-num { color: var(--primary); }
 .cell-chips { display: flex; flex-direction: column; gap: 3px; }
@@ -221,6 +224,9 @@ em { color: var(--faint); font-style: normal; font-size: 12px; }
 .modal-sub { color: var(--muted); font-size: 13.5px; margin: 0 0 16px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .modal-error { color: var(--danger); font-size: 13px; min-height: 16px; margin-top: 8px; }
+/* Trip-vs-busy picker shown after clicking/dragging a day span on the calendar. */
+.chooser-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.chooser-actions .btn { width: 100%; justify-content: center; text-align: center; padding: 13px; font-size: 15px; }
 
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
 .field span { font-weight: 600; }

@@ -426,7 +426,7 @@ function renderHeader() {
     c.querySelector("#btn-signout").onclick = () => { API.logoutOwner(); location.reload(); };
   } else if (v.role === "friend") {
     c.innerHTML = `
-      <span class="badge tier-${escapeHtml(v.tier)}">${escapeHtml(v.name)} · ${escapeHtml(v.tier)}</span>
+      <span class="badge">${escapeHtml(v.name)}</span>
       <button class="btn btn-ghost" id="btn-signout-friend" title="Sign out">Sign out</button>
       <button class="btn btn-ghost" id="btn-owner" title="Owner sign-in">⚙</button>`;
     c.querySelector("#btn-signout-friend").onclick = () => { API.forgetUser(); location.reload(); };
@@ -615,7 +615,7 @@ function renderCalendar() {
 
   const ev = effViewer();
   const legend = ev.role === "owner"
-    ? `<span class="legend-hint">Click a day to add a trip · click a trip to manage it</span>`
+    ? `<span class="legend-hint">Click or drag across days to add a trip or busy day · click a trip to manage it</span>`
     : ev.role === "anon"
     ? `<span class="legend-hint">Marked days are unavailable · sign in with your name and birthday to see details</span>`
     : `<span class="legend-hint">Click a marked day for details${ev.tier === "full" ? " · request a seat" : ""}</span>`;
@@ -638,13 +638,91 @@ function renderCalendar() {
   document.getElementById("prev").onclick = () => { state.cursor = addMonths(state.cursor, -1); loadAndRender(); };
   document.getElementById("next").onclick = () => { state.cursor = addMonths(state.cursor, 1); loadAndRender(); };
   document.getElementById("today").onclick = () => { state.cursor = startOfMonth(new Date()); loadAndRender(); };
-  document.querySelectorAll(".cell").forEach(c => c.addEventListener("click", () => onCellClick(c.dataset.day)));
+  wireCalendarCells();
+}
+
+// A drag across cells just ran, so the browser's trailing click should not also
+// fire onCellClick. Consumed by the next click (or cleared on the next tick when
+// a cross-cell drag produces no click at all).
+let suppressCellClick = false;
+
+function wireCalendarCells() {
+  const grid = document.querySelector(".cal-grid.body");
+  if (!grid) return;
+  grid.querySelectorAll(".cell").forEach(c => c.addEventListener("click", () => {
+    if (suppressCellClick) { suppressCellClick = false; return; }
+    onCellClick(c.dataset.day);
+  }));
+  if (effViewer().role === "owner") wireCalendarDragSelect(grid);
+}
+
+// Owner: press-and-drag across day cells to select a span, then pick trip/busy.
+// A plain tap (no movement onto another cell) falls through to the click handler
+// → onCellClick. Dates are 'YYYY-MM-DD', so string compare gives calendar order.
+function wireCalendarDragSelect(grid) {
+  const cells = [...grid.querySelectorAll(".cell")];
+  const paint = (a, b) => {
+    const lo = a < b ? a : b, hi = a < b ? b : a;
+    for (const c of cells) c.classList.toggle("selecting", c.dataset.day >= lo && c.dataset.day <= hi);
+  };
+  const clear = () => cells.forEach(c => c.classList.remove("selecting"));
+
+  grid.addEventListener("pointerdown", e => {
+    if (e.button > 0 || effViewer().role !== "owner") return;
+    const start = e.target.closest(".cell");
+    if (!start || !grid.contains(start)) return;
+    const anchor = start.dataset.day;
+    let end = anchor, dragging = false;
+
+    const move = ev => {
+      // On touch the pointermove target stays the start element, so hit-test.
+      const cell = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".cell");
+      if (!cell || !grid.contains(cell)) return;
+      if (cell.dataset.day !== anchor) dragging = true;
+      end = cell.dataset.day;
+      if (dragging) { ev.preventDefault(); paint(anchor, end); }
+    };
+    const up = () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      document.removeEventListener("pointercancel", up);
+      clear();
+      if (dragging) {
+        // A cross-cell drag emits no cell-level click; a same-cell one does. Set
+        // the guard for the latter, then drop it next tick so a real drag that
+        // produced no click can't swallow the following genuine click.
+        suppressCellClick = true;
+        setTimeout(() => { suppressCellClick = false; }, 0);
+        openCreateChooser(anchor, end);
+      }
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+    document.addEventListener("pointercancel", up);
+  });
 }
 
 function onCellClick(day) {
   const trips = state.tripsByDay[day] || [];
   if (trips.length) { state.openDay = day; renderDayModal(day); }
-  else if (effViewer().role === "owner") openTripForm(null, { start_date: day, end_date: day });
+  else if (effViewer().role === "owner") openCreateChooser(day, day);
+}
+
+// Owner picks what to drop on a clicked/dragged day span: a trip or a busy
+// marker. Both forms already accept a {start_date, end_date} prefill.
+function openCreateChooser(dayA, dayB) {
+  const start = dayA <= dayB ? dayA : dayB;
+  const end = dayA <= dayB ? dayB : dayA;
+  const range = { start_date: start, end_date: end };
+  openModal(`
+    <div class="modal-head"><h2>New entry</h2><button class="icon-btn" data-close>✕</button></div>
+    <p class="modal-sub">${escapeHtml(fmtRange(start, end))}</p>
+    <div class="chooser-actions">
+      <button class="btn btn-primary" id="ch-trip">🚗 Add a trip</button>
+      <button class="btn" id="ch-busy">⛔ Mark unavailable</button>
+    </div>`);
+  document.getElementById("ch-trip").onclick = () => openTripForm(null, range);
+  document.getElementById("ch-busy").onclick = () => openBusyForm(null, range);
 }
 
 // ─── DAY DETAIL MODAL ──────────────────────────────────────────────────────
