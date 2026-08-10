@@ -52,13 +52,15 @@ jobs:
           script: |
             set -euo pipefail
 
-            # The repo is private and Docker needs root, so deploy via sudo.
-            # A NOPASSWD sudoers rule (set up by deploy/setup-server.sh) limits
-            # this to git + docker.
+            # git runs as the LOGIN USER, not root. /srv/availability is owned by
+            # that user and its credential store already holds the token from the
+            # initial clone, so a private repo fetches with no deploy key and no
+            # root credentials. Only docker needs sudo (a NOPASSWD sudoers rule
+            # from deploy/setup-server.sh limits that to git + docker).
             echo "--- Syncing latest code ---"
-            sudo git config --global --add safe.directory /srv/availability || true
-            sudo git -C /srv/availability fetch --prune origin main
-            sudo git -C /srv/availability reset --hard origin/main
+            git config --global --add safe.directory /srv/availability || true
+            git -C /srv/availability fetch --prune origin main
+            git -C /srv/availability reset --hard origin/main
 
             echo "--- Ensuring shared edge network exists ---"
             # our compose joins the external `web` network owned by the platform
