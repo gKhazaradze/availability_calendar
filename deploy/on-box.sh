@@ -15,6 +15,15 @@ echo "--- Ensuring this app's edge network exists ---"
 docker network inspect edge-availability >/dev/null 2>&1 || docker network create edge-availability
 docker network connect edge-availability caddy 2>/dev/null || true
 
+echo "--- Handing the availability-data volume to the app's user (uid 10001) ---"
+# Since the 5.5 hardening the container runs as uid 10001, but files created
+# before then belong to root. Idempotent: does nothing once every file is
+# 10001's. Uses the caddy image, which is always on the box.
+# BusyBox find (the caddy image's) has -user, not -uid; `set -e` and the
+# temp file make a find error stop the deploy instead of reading as "none".
+docker run --rm --user root --entrypoint sh -v availability-data:/data caddy:2-alpine -c \
+  'set -e; find /data ! -user 10001 > /tmp/todo; n=$(wc -l < /tmp/todo); if [ "$n" -gt 0 ]; then chown -R 10001:10001 /data; echo "  handed $n path(s) over"; else echo "  already 10001"; fi'
+
 echo "--- Building & (re)starting the container ---"
 cd /srv/availability
 docker compose up -d --build --remove-orphans

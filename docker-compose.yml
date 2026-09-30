@@ -24,6 +24,19 @@ services:
       # Persist the SQLite DB (trips, friends, participants) across rebuilds.
       - availability-data:/app/data
     restart: unless-stopped
+    # Hardening (security fix plan 5.5): a non-root user (uid 10001, which owns the
+    # data volume — deploy/on-box.sh hands it over once), a read-only root with
+    # /tmp in memory for gunicorn, no Linux capabilities, and a memory / process
+    # cap so one runaway can't take the box's other apps down with it.
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 128
     networks: [edge]
 
 networks:
