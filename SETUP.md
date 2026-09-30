@@ -3,7 +3,7 @@
 How to stand up **availability_calendar** on the same box as the `my_home_page`
 platform and `roadtrip-site`, served by the platform's Caddy edge at
 `availability.<domain>`. The app runs **network-only** (no host port) and joins
-the shared `web` Docker network; Caddy reaches it as `availability:8000`.
+its own `edge-availability` Docker network (shared only with Caddy); Caddy reaches it as `availability:8000`.
 
 This assumes the platform edge (Caddy) is already running — see the platform
 repo's `SETUP.md`. If it isn't, set that up first.
@@ -22,7 +22,7 @@ repo's `SETUP.md`. If it isn't, set that up first.
 ## Step 1 — Provision the app on the server
 
 SSH in and run the one-shot provisioner. It installs Docker (if needed), creates
-the `web` network (if needed), clones the repo to `/srv/availability`, generates
+its `edge-availability` network (if needed), clones the repo to `/srv/availability`, generates
 a strong `ADMIN_KEY` into `/srv/availability/.env`, and starts the container
 network-only.
 
@@ -136,8 +136,8 @@ Then in a browser:
 
 ## Troubleshooting
 
-**`availability.georgelands.com` 502s.** The container isn't up or isn't on `web`.
-`docker ps`, `docker network inspect web`, confirm `container_name: availability`
+**`availability.georgelands.com` 502s.** The container isn't up or isn't on `edge-availability` (or Caddy isn't).
+`docker ps`, `docker network inspect edge-availability`, confirm `container_name: availability`
 matches the Caddyfile block. Logs: `cd /srv/availability && docker compose logs -f`.
 
 **Owner key doesn't work.** It must match `ADMIN_KEY` in `/srv/availability/.env`.

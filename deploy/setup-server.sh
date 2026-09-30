@@ -5,7 +5,7 @@
 # Run this ONCE on the server. It will:
 #   - install Docker + the compose plugin (if missing)
 #   - clone/sync the repo to /srv/availability
-#   - create the shared `web` network and start the app NETWORK-ONLY (no host
+#   - create this app's own `edge-availability` network and start the app NETWORK-ONLY (no host
 #     port; the platform's Caddy edge serves it at availability.<domain>)
 #   - generate a strong ADMIN_KEY into /srv/availability/.env on first run and
 #     print it ONCE (the key never lives in the image or the repo)
@@ -25,7 +25,7 @@ set -euo pipefail
 REPO_URL="${1:-}"
 INSTALL_DIR="/srv/availability"
 VOLUME="availability-data"
-NETWORK="web"          # shared edge network; the platform's Caddy fronts us
+NETWORK="edge-availability"          # this app's own network, shared only with the platform's Caddy
 
 if [[ -z "$REPO_URL" ]]; then
     echo "Usage: sudo $0 <github_repo_url>"
@@ -60,11 +60,14 @@ if ! docker compose version &>/dev/null; then
     exit 1
 fi
 
-# ─── Shared edge network (our compose attaches to it as external) ─────────
+# ─── Edge network (our compose attaches to it as external) ─────────
 if ! docker network inspect "$NETWORK" >/dev/null 2>&1; then
-    echo "==> Creating shared network '$NETWORK' ..."
+    echo "==> Creating edge network '$NETWORK' ..."
     docker network create "$NETWORK" >/dev/null
 fi
+# Caddy routes to us over it, so it must be on it too (if it is running yet;
+# the platform compose attaches it to every edge network when it starts).
+docker network connect "$NETWORK" caddy 2>/dev/null || true
 
 # ─── Let the deploy user drive docker/git; grant passwordless sudo for CI ──
 if [[ "$DEPLOY_USER" != "root" ]]; then
@@ -141,7 +144,7 @@ cat <<EOF
  Availability Calendar is up (network-only, behind the platform's Caddy edge).
 
   Public URL:   https://availability.<your-domain>   (served by the platform edge)
-  Reached as:   availability:8000 on the shared '$NETWORK' network
+  Reached as:   availability:8000 on its own '$NETWORK' network (shared only with Caddy)
   Admin key:    stored in $ENV_FILE (X-Admin-Key)
 
   Manage:       cd $INSTALL_DIR && docker compose ps

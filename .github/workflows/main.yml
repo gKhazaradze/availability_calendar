@@ -62,10 +62,12 @@ jobs:
             git -C /srv/availability fetch --prune origin main
             git -C /srv/availability reset --hard origin/main
 
-            echo "--- Ensuring shared edge network exists ---"
-            # our compose joins the external `web` network owned by the platform
-            # repo; create-if-missing so a missing network can't fail us.
-            sudo docker network inspect web >/dev/null 2>&1 || sudo docker network create web
+            echo "--- Ensuring this app's edge network exists ---"
+            # Our compose joins `edge-availability`, shared only with the platform's Caddy
+            # (security fix plan 5.2). Create it if missing and make sure Caddy is
+            # on it, so a first deploy never depends on the platform's own order.
+            sudo docker network inspect edge-availability >/dev/null 2>&1 || sudo docker network create edge-availability
+            sudo docker network connect edge-availability caddy 2>/dev/null || true
 
             echo "--- Building & (re)starting the container ---"
             cd /srv/availability

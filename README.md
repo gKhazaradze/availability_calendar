@@ -79,7 +79,7 @@ A single container runs gunicorn, which serves both the API and the static site.
 Use the dev overlay — it republishes `localhost:8000` and enables auto-reload:
 
 ```bash
-docker network create web   # once — the base compose joins this shared network
+docker network create edge-availability   # once — the base compose joins this network
 ADMIN_KEY=dev-key docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 # open http://localhost:8000  → click "Owner", enter dev-key
 ```
@@ -132,7 +132,7 @@ pytest -q                              # run the tests
 
 Deploys as a **network-only** container behind the platform's Caddy edge; the
 GitHub Actions workflow rebuilds and restarts it on every push to `main`. A
-one-shot provisioner installs Docker, creates the shared `web` network, generates
+one-shot provisioner installs Docker, creates its own `edge-availability` network, generates
 an `ADMIN_KEY`, and starts the container:
 
 ```bash
