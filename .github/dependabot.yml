@@ -1,0 +1,37 @@
+# Dependabot (security fix plan 5.14): a weekly PR per ecosystem when a
+# dependency is outdated, minor + patch bumps grouped into one. Merging one
+# deploys it like any push to main, so let its CI finish first.
+# Security fixes also need Dependabot alerts on (repo Settings > Code security).
+version: 2
+updates:
+  # Every package is pinned (5.13), so each bump arrives here as a PR.
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The actions are pinned by commit SHA (5.4); Dependabot bumps SHA and comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
