@@ -1077,9 +1077,10 @@ def test_login_ambiguous_name_and_birthday_denied(client, make_friend):
 
 def test_login_rate_limited_per_ip(client, make_friend):
     make_friend(name="Nino", tier="full", birthday="1995-04-10")
-    for _ in range(10):                               # 10 misses are allowed
-        assert _login(client, "Nino", "1900-01-01", ip="9.9.9.9").status_code == 401
-    assert _login(client, "Nino", "1900-01-01", ip="9.9.9.9").status_code == 429
+    # Misses spread over names, so only the per-IP rule is in play here.
+    for i in range(10):                               # 10 misses are allowed
+        assert _login(client, f"Guess{i}", "1900-01-01", ip="9.9.9.9").status_code == 401
+    assert _login(client, "Guess10", "1900-01-01", ip="9.9.9.9").status_code == 429
     # Lockout blocks even the CORRECT credential during the window...
     assert _login(client, "Nino", "1995-04-10", ip="9.9.9.9").status_code == 429
     # ...but a different IP is unaffected.
@@ -1088,11 +1089,68 @@ def test_login_rate_limited_per_ip(client, make_friend):
 
 def test_login_success_clears_failure_streak(client, make_friend):
     make_friend(name="Nino", tier="full", birthday="1995-04-10")
-    for _ in range(9):
-        assert _login(client, "Nino", "1900-01-01", ip="7.7.7.7").status_code == 401
+    # Misses spread over names, so only the per-IP rule is in play here.
+    for i in range(9):
+        assert _login(client, f"Guess{i}", "1900-01-01", ip="7.7.7.7").status_code == 401
     assert _login(client, "Nino", "1995-04-10", ip="7.7.7.7").status_code == 200   # resets streak
-    for _ in range(9):                                 # 9 fresh misses don't trip the limit
-        assert _login(client, "Nino", "1900-01-01", ip="7.7.7.7").status_code == 401
+    for i in range(9):                                 # 9 fresh misses don't trip the limit
+        assert _login(client, f"Other{i}", "1900-01-01", ip="7.7.7.7").status_code == 401
+
+
+def test_login_rate_limited_per_name_across_ips(client, make_friend):
+    # Security fix plan 5.9: a guesser rotating IPs gets 10 misses per IP, so a
+    # known friend's birthday is also capped per NAME, across every IP.
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    make_friend(name="Sam", tier="full", birthday="2000-01-01")
+    for i in range(10):                               # 10 misses from 10 IPs
+        assert _login(client, "Nino", "1900-01-01", ip=f"6.6.6.{i}").status_code == 401
+    assert _login(client, "Nino", "1900-01-02", ip="6.6.7.1").status_code == 429
+    # Locked means locked: the right birthday from a fresh IP is refused too.
+    assert _login(client, "Nino", "1995-04-10", ip="6.6.7.2").status_code == 429
+    # Other friends are unaffected.
+    assert _login(client, "Sam", "2000-01-01", ip="6.6.7.3").status_code == 200
+
+
+def test_name_lockout_ignores_case_and_spaces(client, make_friend):
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    for i, n in enumerate(["nino", "NINO", " Nino ", "nINo"] * 3):
+        if i == 10:
+            break
+        _login(client, n, "1900-01-01", ip=f"5.5.5.{i}")
+    assert _login(client, "Nino", "1995-04-10", ip="5.5.6.1").status_code == 429
+
+
+def test_unknown_names_lock_too_so_a_lockout_reveals_nothing(client, make_friend):
+    # If only real names could lock, a 429 would confirm a name exists.
+    for i in range(10):
+        assert _login(client, "Ghost", "1900-01-01", ip=f"4.4.4.{i}").status_code == 401
+    assert _login(client, "Ghost", "1900-01-01", ip="4.4.5.1").status_code == 429
+
+
+def test_success_does_not_reset_the_name_counter(client, make_friend):
+    # Otherwise the friend logging in would hand a slow guesser a fresh budget.
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    for i in range(9):
+        _login(client, "Nino", "1900-01-01", ip=f"3.3.3.{i}")
+    assert _login(client, "Nino", "1995-04-10", ip="3.3.4.1").status_code == 200
+    assert _login(client, "Nino", "1900-01-01", ip="3.3.4.2").status_code == 401   # the 10th miss
+    assert _login(client, "Nino", "1995-04-10", ip="3.3.4.3").status_code == 429
+
+
+def test_name_lockout_expires_after_the_window(client, make_friend):
+    import sqlite3
+    import app as app_module
+    make_friend(name="Nino", tier="full", birthday="1995-04-10")
+    for i in range(10):
+        _login(client, "Nino", "1900-01-01", ip=f"2.2.2.{i}")
+    assert _login(client, "Nino", "1995-04-10", ip="2.2.3.1").status_code == 429
+    # Age this test DB's misses past the window (this throwaway DB only).
+    conn = sqlite3.connect(app_module.DATABASE_PATH)
+    conn.execute("UPDATE login_name_attempts SET created_at = datetime('now', ?)",
+                 (f"-{app_module.LOGIN_NAME_WINDOW_SEC + 60} seconds",))
+    conn.commit()
+    conn.close()
+    assert _login(client, "Nino", "1995-04-10", ip="2.2.3.2").status_code == 200
 
 
 def test_admin_create_rejects_bad_birthday(client):

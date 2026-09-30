@@ -98,6 +98,14 @@ MAX_AREA_RADIUS_M = 500_000   # 500 km — plenty for "somewhere in this region"
 # attempts inside a rolling LOGIN_WINDOW_SEC window, after which it 429s.
 LOGIN_WINDOW_SEC = 900        # 15 minutes
 LOGIN_MAX_FAILS = 10          # failed logins per IP per window before lockout
+# ...and per NAME, across every IP (security fix plan 5.9): someone rotating IPs
+# gets 10 misses per IP, so without this a known friend's birthday falls to
+# enough IPs. Every name counts, known or not, so a lockout never reveals that
+# a name exists; a success doesn't reset it, or the friend logging in would
+# hand a slow guesser a fresh budget. A locked name can't log in for up to a
+# day, but a friend's token keeps working, so it only blocks a new sign-in.
+LOGIN_NAME_WINDOW_SEC = 86400  # 24 hours
+LOGIN_NAME_MAX_FAILS = 10      # failed logins per name per window before lockout
 
 TIERS = ("busy", "basic", "full")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -336,6 +344,20 @@ def login_recent_fails(db, ip):
         "SELECT COUNT(*) AS n FROM login_attempts "
         "WHERE ip = ? AND created_at > datetime('now', ?)",
         (ip, f"-{LOGIN_WINDOW_SEC} seconds"),
+    ).fetchone()["n"]
+
+
+def login_name_key(name):
+    """The per-name throttle key: the name as login matches it (trimmed by
+    clean_str, case-folded like COLLATE NOCASE and beyond ASCII)."""
+    return name.casefold()
+
+
+def login_name_recent_fails(db, key):
+    return db.execute(
+        "SELECT COUNT(*) AS n FROM login_name_attempts "
+        "WHERE name_key = ? AND created_at > datetime('now', ?)",
+        (key, f"-{LOGIN_NAME_WINDOW_SEC} seconds"),
     ).fetchone()["n"]
 
 
@@ -812,7 +834,7 @@ def login():
     unknown name) and the vanishingly-rare ambiguous case (two enabled friends
     sharing a name AND birthday) both fail identically as `bad_login`, so the
     response shape leaks nothing about which half was wrong or whether a name
-    exists. Every failure feeds the per-IP throttle.
+    exists. Every failure feeds the per-IP and the per-name throttles.
     """
     body = request.get_json(silent=True) or {}
     name = clean_str(body.get("name"), MAX_NAME)
@@ -821,6 +843,7 @@ def login():
         fail(400, "bad_birthday")
 
     ip = client_ip()
+    name_key = login_name_key(name)
     # The throttle gate and the attempt record must be consistent, so the whole
     # count → lookup → record runs under ONE writer lock (BEGIN IMMEDIATE). The
     # gunicorn workers are separate processes, so a read-then-write across two
@@ -831,7 +854,8 @@ def login():
     throttled = False
     matched = None
     with writing() as w:
-        if login_recent_fails(w, ip) >= LOGIN_MAX_FAILS:
+        if login_recent_fails(w, ip) >= LOGIN_MAX_FAILS or \
+                login_name_recent_fails(w, name_key) >= LOGIN_NAME_MAX_FAILS:
             throttled = True
         else:
             rows = w.execute(
@@ -852,7 +876,13 @@ def login():
                     "INSERT INTO login_attempts (ip, created_at) VALUES (?, datetime('now'))",
                     (ip,),
                 )
+                w.execute(
+                    "INSERT INTO login_name_attempts (name_key, created_at) VALUES (?, datetime('now'))",
+                    (name_key,),
+                )
                 w.execute("DELETE FROM login_attempts WHERE created_at < datetime('now', '-1 day')")
+                w.execute("DELETE FROM login_name_attempts WHERE created_at < datetime('now', ?)",
+                          (f"-{LOGIN_NAME_WINDOW_SEC} seconds",))
 
     # fail()/return AFTER the transaction commits — calling fail() inside would
     # roll back the very attempt we just recorded (writing() rolls back on abort).

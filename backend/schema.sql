@@ -125,3 +125,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, created_at);
+
+-- The same misses, counted per name across every IP (security fix plan 5.9),
+-- so rotating IPs can't keep guessing one friend's birthday. name_key is the
+-- trimmed, case-folded name as typed, known or not. Pruned past its 24 h window.
+CREATE TABLE IF NOT EXISTS login_name_attempts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name_key   TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_login_name_attempts ON login_name_attempts (name_key, created_at);

@@ -147,8 +147,11 @@ the container with the new value.
 **A friend can't sign in.** Sign-in is name + birthday, matched exactly (name is
 case-insensitive). Check the friend has a **birthday set** in the **Friends**
 drawer and that they're **active**. After 10 wrong tries from one IP, sign-in is
-locked for ~15 minutes — wait it out. (Two friends sharing the same name *and*
-birthday can't sign in either; give one a distinct record.)
+locked for ~15 minutes — wait it out. After 10 wrong tries for one **name**, from
+anywhere, that name can't sign in for up to 24 hours (so rotating IPs can't keep
+guessing a birthday); their invite link still works meanwhile, so re-share it.
+(Two friends sharing the same name *and* birthday can't sign in either; give one
+a distinct record.)
 
 **A friend's link stopped working.** Invite links still work as a fallback. You
 rotated or disabled them, or deleted the friend. Re-enable/rotate in **Friends**
