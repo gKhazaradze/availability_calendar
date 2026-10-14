@@ -1,7 +1,7 @@
 # Single-container image: gunicorn runs the Flask app, which serves both the
 # JSON API and the static frontend. `docker compose up -d` and you're done.
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
